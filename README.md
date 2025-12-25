@@ -1,6 +1,7 @@
 Instructions: 
 1. Run /track username to start tracking stats for a player - this means you obviously cannot track past stats.
-2. (optional) Run /claim username to link your discord account to the username, allowing you to run additional commands. This will ask me (Chuckegg) for confirmation, as I don't want 1 person claiming every single tracked account. - running /unclaim will unlink your discord account to the username. 
+2. (optional) Run /claim username to link your discord account to the username, allowing you to run additional commands. This will ask me (Chuckegg) for confirmation, as I don't want 1 person claiming every single tracked account. - running /unclaim will unlink your discord account to the username.
+
 Your stats will now be tracked constantly, allowing you to view information not tracked by popular bots like HyStats.
 Commands:
 /sheepwars - shows you the all-time, session, daily, yesterday and monthly stats for a player.
