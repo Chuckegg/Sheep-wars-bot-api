@@ -454,6 +454,100 @@ def _parse_raw_pattern(raw: str) -> list:
     return parts
 
 
+def render_prestige_with_text(level: int, icon: str, ign: str, suffix: str = "") -> io.BytesIO:
+    """Render a prestige prefix with IGN and optional suffix text (e.g., ' - All-time Stats').
+    
+    Returns a BytesIO containing the rendered PNG image.
+    If Pillow is not available, raises RuntimeError.
+    """
+    if Image is None:
+        raise RuntimeError("Pillow not available")
+    
+    base = (level // 100) * 100
+    raw = PRESTIGE_RAW_PATTERNS.get(base)
+    
+    segments = []
+    
+    if raw:
+        # Parse the pattern and replace the level number
+        parts = _parse_raw_pattern(raw)
+        
+        # Build segments with the actual level
+        concat = ''.join(t for (_, t) in parts)
+        m = re.search(r"\d+", concat)
+        
+        if m:
+            num_start, num_end = m.start(), m.end()
+            pos = 0
+            replaced = False
+            
+            for code, text in parts:
+                part_start = pos
+                part_end = pos + len(text)
+                pos = part_end
+                hexcol = MINECRAFT_CODE_TO_HEX.get(code.lower(), '#FFFFFF')
+                
+                if part_end <= num_start or part_start >= num_end:
+                    segments.append((hexcol, text))
+                    continue
+                
+                # Prefix before number
+                prefix_len = max(0, num_start - part_start)
+                if prefix_len > 0:
+                    segments.append((hexcol, text[:prefix_len]))
+                
+                # Replace with actual level
+                if not replaced:
+                    # Check if this is a rainbow prestige
+                    rainbow_bases = {k for k, v in PRESTIGE_COLORS.items() if v is None}
+                    if base in rainbow_bases:
+                        # Build rainbow colors
+                        colors_in_span = []
+                        pos2 = 0
+                        for c_code, c_text in parts:
+                            part_s = pos2
+                            part_e = pos2 + len(c_text)
+                            pos2 = part_e
+                            overlap_s = max(part_s, num_start)
+                            overlap_e = min(part_e, num_end)
+                            if overlap_e > overlap_s:
+                                hexcol_span = MINECRAFT_CODE_TO_HEX.get(c_code.lower(), '#FFFFFF')
+                                for _ in range(overlap_e - overlap_s):
+                                    colors_in_span.append(hexcol_span)
+                        
+                        if not colors_in_span:
+                            RAINBOW_CODES = ['c', '6', 'e', 'a', 'b', 'd', '9', '3']
+                            colors_in_span = [MINECRAFT_CODE_TO_HEX.get(c, '#FFFFFF') for c in RAINBOW_CODES]
+                        
+                        # Apply colors to level digits
+                        for i, ch in enumerate(str(level)):
+                            col = colors_in_span[i % len(colors_in_span)]
+                            segments.append((col, ch))
+                    else:
+                        segments.append((hexcol, str(level)))
+                    replaced = True
+                
+                # Suffix after number
+                suffix_start_in_part = max(0, num_end - part_start)
+                if suffix_start_in_part < len(text):
+                    segments.append((hexcol, text[suffix_start_in_part:]))
+        else:
+            # No number found, use pattern as-is
+            segments = [(MINECRAFT_CODE_TO_HEX.get(code, '#FFFFFF'), text) for code, text in parts]
+    else:
+        # Fallback: simple colored bracket
+        color = get_prestige_color(level)
+        hexcol = '#{:02x}{:02x}{:02x}'.format(*color)
+        segments = [(hexcol, f"[{level}{icon}]")]
+    
+    # Add IGN and suffix
+    segments.append((MINECRAFT_CODE_TO_HEX.get('f', '#FFFFFF'), f" {ign}"))
+    if suffix:
+        segments.append((MINECRAFT_CODE_TO_HEX.get('f', '#FFFFFF'), suffix))
+    
+    return _render_text_segments_to_image(segments)
+
+
 def _render_text_segments_to_image(segments: list, font=None, padding=(8,6)) -> io.BytesIO:
     """Render colored text segments to a PNG and return a BytesIO."""
     if Image is None:
@@ -1008,17 +1102,11 @@ class StatsTabView(discord.ui.View):
         
         # Get prestige color based on level (for embed accent)
         prestige_color = get_prestige_color(self.level_value)
-        reset_code = "\u001b[0m"
 
         embed = discord.Embed(
             title="",
             color=discord.Color.from_rgb(*prestige_color)
         )
-
-        # Build colored level+icon display (supports multi-color prefixes)
-        colored_prefix = format_prestige_ansi(self.level_value, self.prestige_icon)
-        colored_title = f"{colored_prefix} {self.ign} - {tab_name.title()} Stats"
-        embed.add_field(name="", value=f"```ansi\n{colored_title}```", inline=False)
         
         # Add 6 inline fields: label as field name, data in compact code block
         embed.add_field(name="Wins", value=f"```{str(wins)}```", inline=True)
@@ -1031,40 +1119,86 @@ class StatsTabView(discord.ui.View):
         
         return embed
     
+    def get_title_file(self):
+        """Generate title image file."""
+        if Image is None:
+            return None
+        try:
+            suffix = f" - {self.current_tab.title()} Stats"
+            img_io = render_prestige_with_text(self.level_value, self.prestige_icon, self.ign, suffix)
+            return discord.File(img_io, filename=f"{self.ign}_{self.current_tab}_title.png")
+        except Exception as e:
+            print(f"[WARNING] Title image rendering failed: {e}")
+            return None
+    
+    def add_title_to_embed(self, embed):
+        """Add title to embed, either as image or ANSI text."""
+        title_file = self.get_title_file()
+        if title_file:
+            embed.set_image(url=f"attachment://{self.ign}_{self.current_tab}_title.png")
+            return title_file
+        else:
+            # Fallback to ANSI text
+            colored_prefix = format_prestige_ansi(self.level_value, self.prestige_icon)
+            colored_title = f"{colored_prefix} {self.ign} - {self.current_tab.title()} Stats"
+            # Insert at beginning
+            embed.insert_field_at(0, name="", value=f"```ansi\n{colored_title}```", inline=False)
+            return None
+    
     @discord.ui.button(label="All-time", custom_id="all-time", style=discord.ButtonStyle.primary)
     async def all_time_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.current_tab = "all-time"
         self.update_buttons()
         embed = self.get_stats_embed(self.current_tab)
-        await interaction.response.edit_message(embed=embed, view=self)
+        title_file = self.add_title_to_embed(embed)
+        if title_file:
+            await interaction.response.send_message(embed=embed, view=self, file=title_file)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
     
     @discord.ui.button(label="Session", custom_id="session", style=discord.ButtonStyle.secondary)
     async def session_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.current_tab = "session"
         self.update_buttons()
         embed = self.get_stats_embed(self.current_tab)
-        await interaction.response.edit_message(embed=embed, view=self)
+        title_file = self.add_title_to_embed(embed)
+        if title_file:
+            await interaction.response.send_message(embed=embed, view=self, file=title_file)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
     
     @discord.ui.button(label="Daily", custom_id="daily", style=discord.ButtonStyle.secondary)
     async def daily_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.current_tab = "daily"
         self.update_buttons()
         embed = self.get_stats_embed(self.current_tab)
-        await interaction.response.edit_message(embed=embed, view=self)
+        title_file = self.add_title_to_embed(embed)
+        if title_file:
+            await interaction.response.send_message(embed=embed, view=self, file=title_file)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
     
     @discord.ui.button(label="Yesterday", custom_id="yesterday", style=discord.ButtonStyle.secondary)
     async def yesterday_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.current_tab = "yesterday"
         self.update_buttons()
         embed = self.get_stats_embed(self.current_tab)
-        await interaction.response.edit_message(embed=embed, view=self)
+        title_file = self.add_title_to_embed(embed)
+        if title_file:
+            await interaction.response.send_message(embed=embed, view=self, file=title_file)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
     
     @discord.ui.button(label="Monthly", custom_id="monthly", style=discord.ButtonStyle.secondary)
     async def monthly_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.current_tab = "monthly"
         self.update_buttons()
         embed = self.get_stats_embed(self.current_tab)
-        await interaction.response.edit_message(embed=embed, view=self)
+        title_file = self.add_title_to_embed(embed)
+        if title_file:
+            await interaction.response.send_message(embed=embed, view=self, file=title_file)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
 
 
 # Leaderboard view for switching between periods
@@ -1525,6 +1659,131 @@ async def dmme(interaction: discord.Interaction):
         await interaction.followup.send("Couldn't DM you. Check your privacy settings (Allow DMs from server members).", ephemeral=True)
 
 
+@bot.tree.command(name="prestige", description="Display a prestige prefix for any level")
+@discord.app_commands.describe(
+    level="The prestige level (e.g., 1964)",
+    ign="Optional: Username to display after the prefix"
+)
+async def prestige(interaction: discord.Interaction, level: int, ign: str = None):
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            return
+    
+    try:
+        # Validate level range
+        if level < 0 or level > 10000:
+            await interaction.followup.send("[ERROR] Level must be between 0 and 10000")
+            return
+        
+        # Get prestige icon for this level
+        icon = get_prestige_icon(level)
+        
+        # Build the colored prefix
+        colored_prefix = format_prestige_ansi(level, icon)
+        
+        # Add IGN if provided
+        if ign:
+            display_text = f"{colored_prefix} {ign}"
+        else:
+            display_text = colored_prefix
+        
+        # Try to render as image if Pillow is available
+        if Image is not None:
+            try:
+                base = (level // 100) * 100
+                raw = PRESTIGE_RAW_PATTERNS.get(base)
+                
+                if raw:
+                    # Parse the pattern and replace the level number
+                    parts = _parse_raw_pattern(raw)
+                    
+                    # Build segments with the actual level
+                    concat = ''.join(t for (_, t) in parts)
+                    m = re.search(r"\d+", concat)
+                    
+                    segments = []
+                    if m:
+                        num_start, num_end = m.start(), m.end()
+                        pos = 0
+                        replaced = False
+                        
+                        for code, text in parts:
+                            part_start = pos
+                            part_end = pos + len(text)
+                            pos = part_end
+                            hexcol = MINECRAFT_CODE_TO_HEX.get(code.lower(), '#FFFFFF')
+                            
+                            if part_end <= num_start or part_start >= num_end:
+                                segments.append((hexcol, text))
+                                continue
+                            
+                            # Prefix before number
+                            prefix_len = max(0, num_start - part_start)
+                            if prefix_len > 0:
+                                segments.append((hexcol, text[:prefix_len]))
+                            
+                            # Replace with actual level
+                            if not replaced:
+                                # Check if this is a rainbow prestige
+                                rainbow_bases = {k for k, v in PRESTIGE_COLORS.items() if v is None}
+                                if base in rainbow_bases:
+                                    # Build rainbow colors
+                                    colors_in_span = []
+                                    pos2 = 0
+                                    for c_code, c_text in parts:
+                                        part_s = pos2
+                                        part_e = pos2 + len(c_text)
+                                        pos2 = part_e
+                                        overlap_s = max(part_s, num_start)
+                                        overlap_e = min(part_e, num_end)
+                                        if overlap_e > overlap_s:
+                                            hexcol_span = MINECRAFT_CODE_TO_HEX.get(c_code.lower(), '#FFFFFF')
+                                            for _ in range(overlap_e - overlap_s):
+                                                colors_in_span.append(hexcol_span)
+                                    
+                                    if not colors_in_span:
+                                        RAINBOW_CODES = ['c', '6', 'e', 'a', 'b', 'd', '9', '3']
+                                        colors_in_span = [MINECRAFT_CODE_TO_HEX.get(c, '#FFFFFF') for c in RAINBOW_CODES]
+                                    
+                                    # Apply colors to level digits
+                                    for i, ch in enumerate(str(level)):
+                                        col = colors_in_span[i % len(colors_in_span)]
+                                        segments.append((col, ch))
+                                else:
+                                    segments.append((hexcol, str(level)))
+                                replaced = True
+                            
+                            # Suffix after number
+                            suffix_start_in_part = max(0, num_end - part_start)
+                            if suffix_start_in_part < len(text):
+                                segments.append((hexcol, text[suffix_start_in_part:]))
+                    else:
+                        # No number found, just use the pattern as-is with level prepended
+                        segments = [(MINECRAFT_CODE_TO_HEX.get(parts[0][0], '#FFFFFF'), f"[{level}")]
+                        segments.extend([(MINECRAFT_CODE_TO_HEX.get(code, '#FFFFFF'), text) for code, text in parts[1:]])
+                    
+                    # Add IGN if provided
+                    if ign:
+                        segments.append((MINECRAFT_CODE_TO_HEX.get('f', '#FFFFFF'), f" {ign}"))
+                    
+                    # Render to image
+                    img_io = _render_text_segments_to_image(segments)
+                    filename = f"prestige_{level}" + (f"_{ign}" if ign else "") + ".png"
+                    await interaction.followup.send(file=discord.File(img_io, filename=filename))
+                    return
+            except Exception as e:
+                # Fall back to ANSI if image rendering fails
+                print(f"[WARNING] Image rendering failed: {e}")
+        
+        # Fallback: send as ANSI text
+        await interaction.followup.send(f"```ansi\n{display_text}\n```")
+        
+    except Exception as e:
+        await interaction.followup.send(f"[ERROR] {str(e)}")
+
+
 @bot.tree.command(name="refresh", description="Manually run batch snapshot update for all tracked users")
 @discord.app_commands.describe(mode="One of: daily, yesterday, monthly, or all")
 @discord.app_commands.choices(mode=[
@@ -1629,8 +1888,12 @@ async def sheepwars(interaction: discord.Interaction, ign: str):
         # Create view with tabs
         view = StatsTabView(found_sheet, ign, level_value, prestige_icon)
         embed = view.get_stats_embed("all-time")
+        title_file = view.add_title_to_embed(embed)
         
-        await interaction.followup.send(embed=embed, view=view)
+        if title_file:
+            await interaction.followup.send(embed=embed, view=view, file=title_file)
+        else:
+            await interaction.followup.send(embed=embed, view=view)
         wb.close()
         
     except subprocess.TimeoutExpired:
