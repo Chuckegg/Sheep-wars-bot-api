@@ -2,6 +2,7 @@ import os
 import argparse
 import time
 import json
+import shutil
 from pathlib import Path
 from typing import Dict, Optional
 import requests
@@ -12,6 +13,67 @@ from openpyxl.utils import get_column_letter
 SCRIPT_DIR = Path(__file__).parent.absolute()
 EXCEL_FILE = str(SCRIPT_DIR / "stats.xlsx")
 STAT_ORDER = ["Kills", "Deaths", "K/D", "Wins", "Losses", "W/L"]
+
+def safe_save_workbook(wb, filepath: str) -> bool:
+    """Safely save a workbook with backup and error recovery.
+    
+    Creates a backup before saving. If save fails, restores from backup.
+    Always ensures workbook is closed properly.
+    
+    Args:
+        wb: The openpyxl Workbook object to save
+        filepath: Path to the Excel file
+        
+    Returns:
+        bool: True if save succeeded, False otherwise
+    """
+    backup_path = filepath + ".backup"
+    backup_created = False
+    
+    try:
+        # Create backup if file exists
+        if os.path.exists(filepath):
+            try:
+                shutil.copy2(filepath, backup_path)
+                backup_created = True
+                print(f"[BACKUP] Created backup: {backup_path}")
+            except Exception as backup_err:
+                print(f"[WARNING] Failed to create backup: {backup_err}")
+                # Continue anyway - we'll try to save without backup
+        
+        # Attempt to save
+        wb.save(filepath)
+        print(f"[SAVE] Successfully saved: {filepath}")
+        
+        # Remove backup after successful save
+        if backup_created and os.path.exists(backup_path):
+            try:
+                os.remove(backup_path)
+            except Exception:
+                pass  # Not critical if backup removal fails
+        
+        return True
+        
+    except Exception as save_err:
+        print(f"[ERROR] Failed to save workbook: {save_err}")
+        
+        # Try to restore from backup if save failed
+        if backup_created and os.path.exists(backup_path):
+            try:
+                shutil.copy2(backup_path, filepath)
+                print(f"[RESTORE] Restored from backup after save failure")
+            except Exception as restore_err:
+                print(f"[ERROR] Failed to restore from backup: {restore_err}")
+        
+        return False
+        
+    finally:
+        # Always try to close the workbook
+        try:
+            wb.close()
+            print(f"[CLEANUP] Workbook closed")
+        except Exception as close_err:
+            print(f"[WARNING] Error closing workbook: {close_err}")
 
 def read_api_key_file() -> Optional[str]:
     """Read API key from API_KEY.txt next to the script, if present."""
@@ -70,11 +132,16 @@ def experience_to_level(exp: float) -> int:
 
 # -------- API helpers --------
 
-def get_uuid(username: str) -> str:
+def get_uuid(username: str) -> tuple[str, str]:
+    """Get UUID and properly-cased username from Mojang API.
+    
+    Returns:
+        tuple[str, str]: (uuid, properly_cased_username)
+    """
     r = requests.get(f"https://api.mojang.com/users/profiles/minecraft/{username}", timeout=15)
     r.raise_for_status()
     data = r.json()
-    return data["id"]
+    return data["id"], data.get("name", username)
 
 def get_hypixel_player(uuid: str, api_key: str) -> Dict:
     r = requests.get(
@@ -194,29 +261,37 @@ def extract_wool_games_flat(player_json: Dict) -> Dict:
 # -------- Excel helpers (horizontal layout) --------
 
 def ensure_workbook(path: str):
-    """Load workbook or create new one if file doesn't exist or is corrupted."""
-    if os.path.exists(path):
-        try:
-            return load_workbook(path)
-        except Exception as e:
-            print(f"[WARNING] Failed to load Excel file (possibly corrupted): {e}")
-            print(f"[WARNING] Creating backup and starting with new workbook")
-            # Backup corrupted file
-            backup_path = f"{path}.corrupted.bak"
+    """Load workbook or create new one if file doesn't exist.
+    
+    If file is temporarily locked or corrupted due to concurrent access,
+    retry a few times before giving up.
+    """
+    max_retries = 3
+    retry_delay = 0.5  # seconds
+    
+    for attempt in range(max_retries):
+        if os.path.exists(path):
             try:
-                import shutil
-                shutil.copy(path, backup_path)
-                print(f"[INFO] Backed up corrupted file to {backup_path}")
-            except Exception:
-                pass
-            # Remove corrupted file and create new workbook
-            try:
-                os.remove(path)
-            except Exception:
-                pass
+                return load_workbook(path)
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    # Might be temporarily locked by another process, wait and retry
+                    print(f"[WARNING] Failed to load Excel file (attempt {attempt + 1}/{max_retries}): {e}")
+                    print(f"[INFO] Retrying in {retry_delay} seconds...")
+                    import time
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    # Last attempt failed, file is truly corrupted
+                    print(f"[ERROR] Failed to load Excel file after {max_retries} attempts: {e}")
+                    print(f"[ERROR] File appears to be corrupted. Please restore from backup.")
+                    print(f"[ERROR] NOT creating new workbook to avoid data loss.")
+                    raise RuntimeError(f"Excel file is corrupted and cannot be opened: {e}")
+        else:
             return Workbook()
-    else:
-        return Workbook()
+    
+    # Should never reach here
+    return Workbook()
 
 
 def title_and_headers(ws, start_col: int, title: str, stat_list):
@@ -406,14 +481,24 @@ def save_user_color_and_rank(username: str, rank: Optional[str], guild_tag: Opti
 
 
 def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | None = None):
-    uuid = get_uuid(username)
-    data = get_hypixel_player(uuid, api_key)
+    try:
+        uuid, proper_username = get_uuid(username)
+        data = get_hypixel_player(uuid, api_key)
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 429:
+            print(f"[WARNING] Rate limited (429) for {username}. Skipping update.")
+            # Return empty dict to indicate we skipped the update without error
+            return {"skipped": True, "reason": "rate_limited", "username": username}
+        else:
+            # Re-raise other HTTP errors
+            raise
+    
     current = extract_wool_games_flat(data)
     if not current:
-        raise RuntimeError(f"No Wool Games -> Sheep Wars stats for {username}")
+        raise RuntimeError(f"No Wool Games -> Sheep Wars stats for {proper_username}")
 
     # Fetch guild information
-    print(f"[DEBUG] Fetching guild information for {username} (UUID: {uuid})")
+    print(f"[DEBUG] Fetching guild information for {proper_username} (UUID: {uuid})")
     try:
         guild_data = get_hypixel_guild(uuid, api_key)
         # Save guild data to file for inspection
@@ -423,6 +508,15 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
         print(f"[DEBUG] Guild data saved to guild_info.json")
         guild_tag, guild_color = extract_guild_info(guild_data)
         print(f"[DEBUG] Extracted guild tag: {guild_tag}, color: {guild_color}")
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 429:
+            print(f"[DEBUG] Rate limited (429) fetching guild data for {proper_username}. Using cached data.")
+            guild_data = None
+            guild_tag, guild_color = None, None
+        else:
+            print(f"[DEBUG] Failed to fetch guild data: {e}")
+            guild_data = None
+            guild_tag, guild_color = None, None
     except Exception as e:
         print(f"[DEBUG] Failed to fetch guild data: {e}")
         guild_data = None
@@ -430,8 +524,8 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
 
     # Extract and save player rank and guild info to user_colors.json
     rank = extract_player_rank(data)
-    print(f"[DEBUG] Extracted rank for {username}: {rank}")
-    save_user_color_and_rank(username, rank, guild_tag, guild_color)
+    print(f"[DEBUG] Extracted rank for {proper_username}: {rank}")
+    save_user_color_and_rank(proper_username, rank, guild_tag, guild_color)
 
     # Open workbook (create if missing) and create/select player's sheet
     wb = ensure_workbook(EXCEL_FILE)
@@ -457,8 +551,8 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
                     return False
             return True
 
-        if username in wb.sheetnames:
-            ws = wb[username]
+        if proper_username in wb.sheetnames:
+            ws = wb[proper_username]
             # If not the new layout, clear and rebuild
             if not is_single_table_layout(ws):
                 ws.delete_rows(1, ws.max_row)
@@ -467,7 +561,7 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
             else:
                 new_sheet = False
         else:
-            ws = wb.create_sheet(username)
+            ws = wb.create_sheet(proper_username)
             new_sheet = True
 
         # Build ordered key list: preferred first, then any remaining keys
@@ -629,7 +723,11 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
             # older openpyxl versions may not have calculation_properties
             pass
 
-        wb.save(EXCEL_FILE)
+        # Use safe save with backup and error recovery
+        save_success = safe_save_workbook(wb, EXCEL_FILE)
+        if not save_success:
+            raise RuntimeError("Failed to save Excel file. Check logs for details.")
+        
         return {
             "uuid": uuid,
             "stats": current,
@@ -644,12 +742,6 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
         except Exception:
             pass
         raise
-    finally:
-        # Ensure workbook is always closed
-        try:
-            wb.close()
-        except Exception:
-            pass
 
 
 def main():

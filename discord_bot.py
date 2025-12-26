@@ -5,6 +5,7 @@ import sys
 from openpyxl import load_workbook
 import os
 import re
+import shutil
 from zoneinfo import ZoneInfo
 import json
 from pathlib import Path
@@ -25,6 +26,67 @@ CREATOR_NAME = "chuckegg"
 # Optionally set a numeric Discord user ID for direct DM (recommended for reliability)
 CREATOR_ID = "542467909549555734"
 CREATOR_TZ = ZoneInfo("America/New_York")
+
+def safe_save_workbook(wb, filepath: str) -> bool:
+    """Safely save a workbook with backup and error recovery.
+    
+    Creates a backup before saving. If save fails, restores from backup.
+    Always ensures workbook is closed properly.
+    
+    Args:
+        wb: The openpyxl Workbook object to save
+        filepath: Path to the Excel file
+        
+    Returns:
+        bool: True if save succeeded, False otherwise
+    """
+    backup_path = str(filepath) + ".backup"
+    backup_created = False
+    
+    try:
+        # Create backup if file exists
+        if os.path.exists(filepath):
+            try:
+                shutil.copy2(filepath, backup_path)
+                backup_created = True
+                print(f"[BACKUP] Created backup: {backup_path}")
+            except Exception as backup_err:
+                print(f"[WARNING] Failed to create backup: {backup_err}")
+                # Continue anyway - we'll try to save without backup
+        
+        # Attempt to save
+        wb.save(str(filepath))
+        print(f"[SAVE] Successfully saved: {filepath}")
+        
+        # Remove backup after successful save
+        if backup_created and os.path.exists(backup_path):
+            try:
+                os.remove(backup_path)
+            except Exception:
+                pass  # Not critical if backup removal fails
+        
+        return True
+        
+    except Exception as save_err:
+        print(f"[ERROR] Failed to save workbook: {save_err}")
+        
+        # Try to restore from backup if save failed
+        if backup_created and os.path.exists(backup_path):
+            try:
+                shutil.copy2(backup_path, filepath)
+                print(f"[RESTORE] Restored from backup after save failure")
+            except Exception as restore_err:
+                print(f"[ERROR] Failed to restore from backup: {restore_err}")
+        
+        return False
+        
+    finally:
+        # Always try to close the workbook
+        try:
+            wb.close()
+            print(f"[CLEANUP] Workbook closed")
+        except Exception as close_err:
+            print(f"[WARNING] Error closing workbook: {close_err}")
 
 # sanitize output for Discord (remove problematic unicode/control chars)
 def sanitize_output(text: str) -> str:
@@ -69,19 +131,30 @@ def _to_number(val):
         return 0
 
 # Helper function to run scripts with proper working directory
-def run_script(script_name, args):
+def run_script(script_name, args, timeout=30):
     """Run a Python script in the bot directory with proper working directory"""
     return subprocess.run(
         [sys.executable, script_name, *args],
         cwd=str(BOT_DIR),
         capture_output=True,
         text=True,
-        timeout=30
+        timeout=timeout
+    )
+
+def run_script_batch(script_name, args):
+    """Run a batch script with extended timeout (5 minutes for large user lists)"""
+    return subprocess.run(
+        [sys.executable, script_name, *args],
+        cwd=str(BOT_DIR),
+        capture_output=True,
+        text=True,
+        timeout=300  # 5 minutes for batch operations
     )
 
 # additional imports for background tasks
 import asyncio
 import datetime
+import random
 
 def format_playtime(seconds: int) -> str:
     """Convert playtime from seconds to human-readable format.
@@ -802,6 +875,180 @@ def create_stats_composite_image(level: int, icon: str, ign: str, tab_name: str,
     return out
 
 
+def create_leaderboard_image(tab_name: str, metric_label: str, leaderboard_data: list) -> io.BytesIO:
+    """Create a leaderboard image similar to the SheepWars format.
+    
+    Args:
+        tab_name: The period/tab name (e.g., "Lifetime", "Session")
+        metric_label: The stat being displayed (e.g., "Magic Wool", "Kills")
+        leaderboard_data: List of tuples (rank, player_name, level, icon, ign_color, value, is_playtime)
+    
+    Returns:
+        BytesIO containing the rendered PNG image
+    """
+    if Image is None:
+        raise RuntimeError("Pillow not available")
+    
+    # Dimensions and styling
+    row_height = 50
+    header_height = 60  # Reduced from 80 since we only have one title line now
+    padding = 15
+    
+    # Column widths
+    pos_width = 80
+    player_width = 380
+    stat_width = 180
+    
+    total_width = pos_width + player_width + stat_width + (padding * 4)
+    num_rows = len(leaderboard_data)
+    # Add extra padding at the bottom to ensure last row isn't cut off
+    total_height = header_height + (row_height * (num_rows + 1)) + (padding * 2)
+    
+    # Create image with dark background
+    img = Image.new('RGB', (total_width, total_height), (30, 30, 35))
+    draw = ImageDraw.Draw(img)
+    
+    # Fonts
+    try:
+        title_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 28)
+        header_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 20)
+        data_font = ImageFont.truetype("DejaVuSans.ttf", 18)
+        prestige_font = ImageFont.truetype("DejaVuSans.ttf", 16)
+    except Exception:
+        title_font = ImageFont.load_default()
+        header_font = ImageFont.load_default()
+        data_font = ImageFont.load_default()
+        prestige_font = ImageFont.load_default()
+    
+    # Draw title - just "{tab_name} {metric_label} Leaderboard"
+    title_text = f"{tab_name} {metric_label} Leaderboard"
+    
+    # Calculate title position
+    bbox = draw.textbbox((0, 0), title_text, font=title_font)
+    title_width = bbox[2] - bbox[0]
+    title_x = (total_width - title_width) // 2
+    
+    draw.text((title_x, 20), title_text, font=title_font, fill=(220, 220, 220))
+    
+    # Draw header row background (darker shade)
+    header_y = header_height
+    draw.rectangle([(0, header_y), (total_width, header_y + row_height)], fill=(45, 45, 50))
+    
+    # Draw header text
+    header_texts = ["Pos", "Player", metric_label]
+    header_x_positions = [
+        padding + pos_width // 2,
+        padding + pos_width + padding + player_width // 2,
+        padding + pos_width + padding + player_width + padding + stat_width // 2
+    ]
+    
+    for text, x_pos in zip(header_texts, header_x_positions):
+        bbox = draw.textbbox((0, 0), text, font=header_font)
+        text_width = bbox[2] - bbox[0]
+        draw.text((x_pos - text_width // 2, header_y + 15), text, font=header_font, fill=(200, 200, 200))
+    
+    # Draw data rows
+    y_offset = header_y + row_height
+    
+    for rank, player_name, level, icon, ign_color, value, is_playtime in leaderboard_data:
+        # Alternate row colors for better readability
+        if rank % 2 == 0:
+            draw.rectangle([(0, y_offset), (total_width, y_offset + row_height)], fill=(38, 38, 43))
+        else:
+            draw.rectangle([(0, y_offset), (total_width, y_offset + row_height)], fill=(30, 30, 35))
+        
+        # Draw rank number
+        rank_text = f"#{rank}"
+        bbox = draw.textbbox((0, 0), rank_text, font=data_font)
+        rank_width = bbox[2] - bbox[0]
+        rank_x = padding + pos_width // 2 - rank_width // 2
+        draw.text((rank_x, y_offset + 15), rank_text, font=data_font, fill=(255, 255, 255))
+        
+        # Draw player name with prestige prefix
+        player_x = padding + pos_width + padding
+        
+        # Get prestige colors - need to handle bracket color vs content color
+        base = (level // 100) * 100
+        raw = PRESTIGE_RAW_PATTERNS.get(base)
+        bracket_color = (170, 170, 170)  # Default gray for brackets
+        content_color = (170, 170, 170)  # Default gray for content
+        
+        if raw:
+            # Extract color codes - first for bracket, second for content if different
+            color_codes = re.findall(r'&([0-9a-fA-F])', raw)
+            if len(color_codes) >= 2:
+                # If we have at least 2 color codes, use first for bracket, second for content
+                code1 = color_codes[0].lower()
+                code2 = color_codes[1].lower()
+                hexcol1 = MINECRAFT_CODE_TO_HEX.get(code1)
+                hexcol2 = MINECRAFT_CODE_TO_HEX.get(code2)
+                if hexcol1:
+                    bracket_color = tuple(int(hexcol1.lstrip('#')[i:i+2], 16) for i in (0,2,4))
+                if hexcol2:
+                    content_color = tuple(int(hexcol2.lstrip('#')[i:i+2], 16) for i in (0,2,4))
+            elif len(color_codes) == 1:
+                # If only one color code, use it for both
+                code = color_codes[0].lower()
+                hexcol = MINECRAFT_CODE_TO_HEX.get(code)
+                if hexcol:
+                    bracket_color = tuple(int(hexcol.lstrip('#')[i:i+2], 16) for i in (0,2,4))
+                    content_color = bracket_color
+        
+        # Draw prestige with proper colors: [<bracket>level icon<bracket>]
+        # Draw opening bracket
+        draw.text((player_x, y_offset + 15), "[", font=prestige_font, fill=bracket_color)
+        bbox = draw.textbbox((player_x, y_offset + 15), "[", font=prestige_font)
+        current_x = bbox[2] - bbox[0]
+        
+        # Draw level and icon in content color
+        level_icon_text = f"{level}{icon}"
+        draw.text((player_x + current_x, y_offset + 15), level_icon_text, font=prestige_font, fill=content_color)
+        bbox = draw.textbbox((player_x + current_x, y_offset + 15), level_icon_text, font=prestige_font)
+        current_x += bbox[2] - bbox[0]
+        
+        # Draw closing bracket
+        draw.text((player_x + current_x, y_offset + 15), "]", font=prestige_font, fill=bracket_color)
+        bbox = draw.textbbox((player_x + current_x, y_offset + 15), "]", font=prestige_font)
+        current_x += bbox[2] - bbox[0]
+        
+        prestige_width = current_x
+        
+        # Draw player name with custom color
+        try:
+            if ign_color:
+                player_color = tuple(int(ign_color.lstrip('#')[i:i+2], 16) for i in (0,2,4))
+            else:
+                player_color = (255, 255, 255)
+        except Exception:
+            player_color = (255, 255, 255)
+        
+        name_x = player_x + prestige_width + 5
+        draw.text((name_x, y_offset + 15), player_name, font=data_font, fill=player_color)
+        
+        # Draw stat value
+        if is_playtime:
+            formatted_value = format_playtime(int(value))
+        else:
+            # Format large numbers with commas
+            if isinstance(value, float):
+                formatted_value = f"{value:,.2f}" if value % 1 else f"{int(value):,}"
+            else:
+                formatted_value = f"{int(value):,}"
+        
+        value_bbox = draw.textbbox((0, 0), formatted_value, font=data_font)
+        value_width = value_bbox[2] - value_bbox[0]
+        value_x = padding + pos_width + padding + player_width + padding + stat_width // 2 - value_width // 2
+        draw.text((value_x, y_offset + 15), formatted_value, font=data_font, fill=(255, 255, 255))
+        
+        y_offset += row_height
+    
+    # Save to BytesIO
+    out = io.BytesIO()
+    img.save(out, format='PNG')
+    out.seek(0)
+    return out
+
+
 def render_prestige_range_image(base: int, end_display: int) -> io.BytesIO:
     """Render an image showing the colored start and end prestige brackets from raw pattern."""
     raw = PRESTIGE_RAW_PATTERNS.get(base)
@@ -1158,6 +1405,103 @@ def unlink_user_from_ign(ign: str) -> bool:
         return True
     return False
 
+def remove_user_color(ign: str) -> bool:
+    """Remove username from user_colors.json"""
+    try:
+        if not os.path.exists(USER_COLORS_FILE):
+            return False
+        with open(USER_COLORS_FILE, 'r') as f:
+            color_data = json.load(f)
+        
+        key = ign.casefold()
+        if key in color_data:
+            del color_data[key]
+            with open(USER_COLORS_FILE, 'w') as f:
+                json.dump(color_data, f, indent=2)
+            return True
+        return False
+    except Exception as e:
+        print(f"[ERROR] Failed to remove user color for {ign}: {e}")
+        return False
+
+def delete_user_sheet(ign: str) -> bool:
+    """Delete username's sheet from stats.xlsx"""
+    wb = None
+    try:
+        excel_file = BOT_DIR / "stats.xlsx"
+        if not excel_file.exists():
+            return False
+        
+        wb = load_workbook(str(excel_file))
+        key = ign.casefold()
+        sheet_to_delete = None
+        
+        for sheet_name in wb.sheetnames:
+            if sheet_name.casefold() == key:
+                sheet_to_delete = sheet_name
+                break
+        
+        if sheet_to_delete:
+            del wb[sheet_to_delete]
+            save_success = safe_save_workbook(wb, str(excel_file))
+            if not save_success:
+                print(f"[ERROR] Failed to save after deleting sheet for {ign}")
+                return False
+            return True
+        
+        # Sheet not found, just close workbook
+        try:
+            wb.close()
+        except Exception:
+            pass
+        return False
+    except Exception as e:
+        print(f"[ERROR] Failed to delete sheet for {ign}: {e}")
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception:
+                pass
+        return False
+
+async def cleanup_untracked_user_delayed(ign: str, delay_seconds: int = 60):
+    """Schedule cleanup of untracked user data after a delay.
+    
+    Waits for delay_seconds, then checks if the user is still untracked.
+    If they're still untracked, removes their color data and sheet.
+    """
+    try:
+        print(f"[CLEANUP] Scheduled cleanup for '{ign}' in {delay_seconds} seconds")
+        await asyncio.sleep(delay_seconds)
+        
+        # Check if user is now tracked
+        tracked_users = load_tracked_users()
+        print(f"[CLEANUP] After {delay_seconds}s delay, checking if '{ign}' is tracked")
+        print(f"[CLEANUP] Tracked users list: {tracked_users}")
+        
+        key = ign.casefold()
+        for tracked_user in tracked_users:
+            if tracked_user.casefold() == key:
+                # User is now tracked, don't clean up
+                print(f"[CLEANUP] SKIPPING cleanup for '{ign}' - found in tracked_users.txt as '{tracked_user}'")
+                return
+        
+        # User is still untracked, proceed with cleanup
+        print(f"[CLEANUP] User '{ign}' NOT FOUND in tracked_users.txt")
+        print(f"[CLEANUP] Reason: User was queried via /sheepwars but is not in tracked list")
+        print(f"[CLEANUP] Proceeding with cleanup: removing color data and deleting sheet")
+        
+        color_removed = remove_user_color(ign)
+        sheet_deleted = delete_user_sheet(ign)
+        
+        print(f"[CLEANUP] Cleanup complete for '{ign}' - color_removed={color_removed}, sheet_deleted={sheet_deleted}")
+    except asyncio.CancelledError:
+        print(f"[CLEANUP] Cleanup task cancelled for '{ign}'")
+    except Exception as e:
+        print(f"[CLEANUP] ERROR during cleanup for '{ign}': {e}")
+        import traceback
+        traceback.print_exc()
+
 async def send_fetch_message(message: str):
     # DM the creator (prefer explicit ID if set)
     user = None
@@ -1204,44 +1548,94 @@ async def send_fetch_message(message: str):
             except Exception:
                 continue
 
+async def _delayed_refresh_user(username: str, delay: float):
+    """Sleep for `delay` seconds then run api_get.py for the given username."""
+    try:
+        await asyncio.sleep(delay)
+        await asyncio.to_thread(run_script, "api_get.py", ["-ign", username])
+    except asyncio.CancelledError:
+        return
+    except Exception as e:
+        print(f"[REFRESH] Error refreshing {username}: {e}")
+
+
+async def staggered_stats_refresher(interval_minutes: int = 10):
+    """Background task that refreshes every tracked user's stats once per `interval_minutes`.
+
+    Each user's refresh is scheduled at a random point during the interval to spread load.
+    """
+    interval = interval_minutes * 60
+    buffer = 5  # seconds buffer to avoid scheduling at the very end
+    while True:
+        try:
+            users = load_tracked_users()
+            if not users:
+                await asyncio.sleep(interval)
+                continue
+
+            # assign a random delay in [0, interval-buffer) to each user, then schedule
+            tasks = []
+            for u in users:
+                d = random.uniform(0, max(0, interval - buffer))
+                tasks.append(asyncio.create_task(_delayed_refresh_user(u, d)))
+
+            # wait for the interval to elapse; leave any straggling tasks to finish in background
+            await asyncio.sleep(interval)
+
+            # optionally gather any finished tasks and suppress exceptions
+            for t in tasks:
+                if t.done():
+                    try:
+                        t.result()
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            print(f"[REFRESH] Staggered refresher error: {e}")
+            await asyncio.sleep(interval)
+
+
 async def scheduler_loop():
-    """Automatic scheduler using batch_update.py"""
+    """Automatic scheduler for daily and monthly snapshots"""
     last_run = None
     while True:
         now = datetime.datetime.now(tz=CREATOR_TZ)
-        # Run batch update at 9:30 AM
+        # Run snapshot updates at 9:30 AM
         if now.hour == 9 and now.minute == 30:
             today = now.date()
             if last_run != today:
                 try:
-                    # Step 1: Rotate daily snapshot to yesterday snapshot
-                    def run_rotate():
-                        return run_script("rotate_yesterday.py", [])
+                    # Step 1: Run yesterday snapshot (before daily overwrites it)
+                    def run_yesterday():
+                        return run_script_batch("batch_update.py", ["-schedule", "yesterday"])
                     
-                    rotate_result = await asyncio.to_thread(run_rotate)
-                    if rotate_result.returncode != 0:
-                        await send_fetch_message(f"Warning: Yesterday rotation failed at {now.strftime('%I:%M %p')}")
+                    yesterday_result = await asyncio.to_thread(run_yesterday)
+                    if yesterday_result.returncode != 0:
+                        await send_fetch_message(f"Warning: Yesterday snapshot failed at {now.strftime('%I:%M %p')}")
                     
                     # Step 2: Determine which snapshots to take
                     # Daily: always
                     # Monthly: only on 1st of month
-                    schedule = "all" if now.day == 1 else "daily"
+                    if now.day == 1:
+                        schedule = "all"  # daily + monthly
+                    else:
+                        schedule = "daily"
                     
-                    # Step 3: Run batch_update.py (without force - respect metadata)
+                    # Step 3: Run batch_update.py for daily (and monthly if 1st)
                     def run_batch():
-                        return run_script("batch_update.py", ["-schedule", schedule])
+                        return run_script_batch("batch_update.py", ["-schedule", schedule])
                     
                     result = await asyncio.to_thread(run_batch)
                     if result.returncode == 0:
-                        msg = f"Daily batch update completed at {now.strftime('%I:%M %p')}"
+                        msg = f"Daily snapshot completed at {now.strftime('%I:%M %p')}"
                         if now.day == 1:
                             msg += " (including monthly snapshots)"
                         await send_fetch_message(msg)
                     else:
                         error_msg = result.stderr or result.stdout or "Unknown error"
-                        await send_fetch_message(f"Daily batch update failed: {error_msg[:200]}")
+                        await send_fetch_message(f"Daily snapshot failed: {error_msg[:200]}")
                 except Exception as e:
-                    await send_fetch_message(f"Daily batch update error: {str(e)}")
+                    await send_fetch_message(f"Snapshot update error: {str(e)}")
                 
                 last_run = today
         
@@ -1465,6 +1859,21 @@ class LeaderboardView(discord.ui.View):
             "magic_wool_hit": "Magic Wool Hit",
             "playtime": "Playtime",
         }
+        
+        # Load user colors
+        self.user_colors = {}
+        try:
+            if os.path.exists(USER_COLORS_FILE):
+                with open(USER_COLORS_FILE, 'r') as f:
+                    color_data = json.load(f)
+                    for username, user_entry in color_data.items():
+                        if isinstance(user_entry, str):
+                            self.user_colors[username] = user_entry
+                        elif isinstance(user_entry, dict):
+                            self.user_colors[username] = user_entry.get('color')
+        except Exception as e:
+            print(f"[WARNING] Failed to load user colors: {e}")
+        
         self.update_buttons()
     
     def update_buttons(self):
@@ -1474,6 +1883,112 @@ class LeaderboardView(discord.ui.View):
                     child.style = discord.ButtonStyle.primary
                 else:
                     child.style = discord.ButtonStyle.secondary
+    
+    def generate_leaderboard_image(self, period: str):
+        """Generate leaderboard image for the given period."""
+        col = self.column_map[period]
+        metric_label = self.metric_labels[self.metric]
+        
+        # Collect all player stats with level info
+        leaderboard = []
+        for sheet_name in self.wb.sheetnames:
+            if sheet_name.casefold() == "sheep wars historical data":
+                continue
+            try:
+                sheet = self.wb[sheet_name]
+                
+                # Find stat rows dynamically
+                stat_rows = {}
+                for i in range(1, 100):
+                    stat_name = sheet[f'A{i}'].value
+                    if stat_name:
+                        stat_key = str(stat_name).lower()
+                        if stat_key not in stat_rows:  # Store first occurrence
+                            stat_rows[stat_key] = i
+                
+                # Get base values from appropriate column
+                metric_value = None
+                
+                if self.metric == "kdr":
+                    kills = _to_number(sheet[f"{col}{stat_rows.get('kills', 1)}"].value)
+                    deaths = _to_number(sheet[f"{col}{stat_rows.get('deaths', 1)}"].value)
+                    metric_value = round(kills / deaths, 2) if deaths > 0 else kills
+                elif self.metric == "wlr":
+                    wins = _to_number(sheet[f"{col}{stat_rows.get('wins', 1)}"].value)
+                    losses = _to_number(sheet[f"{col}{stat_rows.get('losses', 1)}"].value)
+                    metric_value = round(wins / losses, 2) if losses > 0 else wins
+                else:
+                    # Find the stat row for this metric
+                    metric_key = self.metric
+                    if metric_key in stat_rows:
+                        value = sheet[f"{col}{stat_rows[metric_key]}"].value
+                        metric_value = _to_number(value)
+                
+                if metric_value is not None and isinstance(metric_value, (int, float)):
+                    # Get level for prestige display
+                    try:
+                        level_value = 0
+                        level_row = None
+                        exp_row = None
+                        for i in range(1, 100):
+                            name = sheet[f'A{i}'].value
+                            if not name:
+                                continue
+                            key = str(name).lower()
+                            if key == 'level' and level_row is None:
+                                level_row = i
+                            elif key == 'experience' and exp_row is None:
+                                exp_row = i
+                        if level_row is not None:
+                            level_value = int(sheet[f'B{level_row}'].value or 0)
+                        elif exp_row is not None:
+                            exp = sheet[f'B{exp_row}'].value or 0
+                            level_value = int((exp or 0) / 5000)
+                    except Exception:
+                        level_value = 0
+                    
+                    icon = get_prestige_icon(level_value)
+                    is_playtime = self.metric == "playtime"
+                    
+                    # Get user color
+                    ign_color = self.user_colors.get(sheet_name.lower())
+                    
+                    leaderboard.append((sheet_name, float(metric_value), metric_value, is_playtime, level_value, icon, ign_color))
+                
+            except Exception:
+                continue
+        
+        # Sort by value descending
+        leaderboard.sort(key=lambda x: x[1], reverse=True)
+        
+        if not leaderboard:
+            # Return None if no data
+            return None, None
+        
+        # Prepare data for image generation (top 10 only)
+        image_data = []
+        for i, entry in enumerate(leaderboard[:10], 1):
+            player = entry[0]
+            value = entry[2]
+            is_playtime = entry[3]
+            level_value = entry[4]
+            icon = entry[5]
+            ign_color = entry[6]
+            
+            image_data.append((i, player, level_value, icon, ign_color, value, is_playtime))
+        
+        if Image is not None:
+            try:
+                img_io = create_leaderboard_image(period.title(), metric_label, image_data)
+                filename = f"leaderboard_{self.metric}_{period}.png"
+                return None, discord.File(img_io, filename=filename)
+            except Exception as e:
+                print(f"[WARNING] Leaderboard image generation failed: {e}")
+                # Fall back to embed
+                return self.get_leaderboard_embed(period), None
+        else:
+            # Fall back to embed if Pillow not available
+            return self.get_leaderboard_embed(period), None
     
     def get_leaderboard_embed(self, period: str):
         col = self.column_map[period]
@@ -1588,36 +2103,51 @@ class LeaderboardView(discord.ui.View):
     async def lifetime_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.current_period = "lifetime"
         self.update_buttons()
-        embed = self.get_leaderboard_embed(self.current_period)
-        await interaction.response.edit_message(embed=embed, view=self)
+        embed, file = self.generate_leaderboard_image(self.current_period)
+        if file:
+            await interaction.response.edit_message(view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
     
     @discord.ui.button(label="Session", custom_id="session", style=discord.ButtonStyle.secondary)
     async def session_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.current_period = "session"
         self.update_buttons()
-        embed = self.get_leaderboard_embed(self.current_period)
-        await interaction.response.edit_message(embed=embed, view=self)
+        embed, file = self.generate_leaderboard_image(self.current_period)
+        if file:
+            await interaction.response.edit_message(view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
     
     @discord.ui.button(label="Daily", custom_id="daily", style=discord.ButtonStyle.secondary)
     async def daily_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.current_period = "daily"
         self.update_buttons()
-        embed = self.get_leaderboard_embed(self.current_period)
-        await interaction.response.edit_message(embed=embed, view=self)
+        embed, file = self.generate_leaderboard_image(self.current_period)
+        if file:
+            await interaction.response.edit_message(view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
     
     @discord.ui.button(label="Yesterday", custom_id="yesterday", style=discord.ButtonStyle.secondary)
     async def yesterday_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.current_period = "yesterday"
         self.update_buttons()
-        embed = self.get_leaderboard_embed(self.current_period)
-        await interaction.response.edit_message(embed=embed, view=self)
+        embed, file = self.generate_leaderboard_image(self.current_period)
+        if file:
+            await interaction.response.edit_message(view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
     
     @discord.ui.button(label="Monthly", custom_id="monthly", style=discord.ButtonStyle.secondary)
     async def monthly_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.current_period = "monthly"
         self.update_buttons()
-        embed = self.get_leaderboard_embed(self.current_period)
-        await interaction.response.edit_message(embed=embed, view=self)
+        embed, file = self.generate_leaderboard_image(self.current_period)
+        if file:
+            await interaction.response.edit_message(view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
 
 
 # Create bot with command tree for slash commands
@@ -1669,10 +2199,12 @@ async def on_ready():
         print(f"[OK] Synced {len(synced)} command(s) - Instance ID: {bot_instance_id}")
     except Exception as e:
         print(f"[ERROR] Failed to sync commands: {e}")
-    # start background scheduler once
-    if not getattr(bot, "scheduler_started", False):
+    # start background tasks once
+    if not getattr(bot, "background_tasks_started", False):
         bot.loop.create_task(scheduler_loop())
-        bot.scheduler_started = True
+        bot.loop.create_task(staggered_stats_refresher(interval_minutes=10))
+        bot.background_tasks_started = True
+        print(f"[OK] Background tasks started - Instance ID: {bot_instance_id}")
 
 @bot.tree.command(name="track", description="Create a stats sheet for a player (no authorization required)")
 @discord.app_commands.describe(ign="Minecraft IGN")
@@ -1684,41 +2216,39 @@ async def track(interaction: discord.Interaction, ign: str):
             return
     
     try:
-        # Check if sheet already exists
-        excel_file = BOT_DIR / "stats.xlsx"
-        if excel_file.exists():
-            try:
-                wb = load_workbook(str(excel_file))
-                for sheet_name in wb.sheetnames:
-                    if sheet_name.casefold() == ign.casefold():
-                        wb.close()
-                        await interaction.followup.send(f"{ign} is already being tracked.")
-                        return
-                wb.close()
-            except Exception:
-                pass
+        # Check if user is already in tracked_users.txt
+        tracked_users = load_tracked_users()
+        key = ign.casefold()
+        for tracked_user in tracked_users:
+            if tracked_user.casefold() == key:
+                await interaction.followup.send(f"{tracked_user} is already being tracked.")
+                return
         
         # Create sheet using api_get.py
-        result = run_script("api_get.py", ["-ign", ign, "-session", "-daily", "-yesterday", "-monthly"])
+        # Initialize session, daily, and monthly snapshots (yesterday will be populated from daily rotation)
+        result = run_script("api_get.py", ["-ign", ign, "-session", "-daily", "-monthly"])
 
         if result.returncode == 0:
             print(f"[OK] api_get.py succeeded for {ign}")
             
-            # Verify the sheet was actually created
+            # Verify the sheet was actually created and get the properly-cased username
             excel_file = BOT_DIR / "stats.xlsx"
             if not excel_file.exists():
                 await interaction.followup.send(f"[ERROR] Excel file was not created for {ign}.")
                 return
             
-            # Load and check if the sheet exists
+            # Load and check if the sheet exists, and get the actual sheet name (proper case)
+            actual_ign = ign  # Default to input if not found
+            wb = None
             try:
                 wb = load_workbook(str(excel_file))
                 sheet_exists = False
+                key = ign.casefold()
                 for sheet_name in wb.sheetnames:
-                    if sheet_name.casefold() == ign.casefold():
+                    if sheet_name.casefold() == key:
                         sheet_exists = True
+                        actual_ign = sheet_name  # Get the properly cased username from the sheet name
                         break
-                wb.close()
                 
                 if not sheet_exists:
                     await interaction.followup.send(f"[ERROR] Sheet for {ign} was not created.")
@@ -1726,14 +2256,20 @@ async def track(interaction: discord.Interaction, ign: str):
             except Exception as e:
                 await interaction.followup.send(f"[ERROR] Could not verify sheet creation: {str(e)}")
                 return
+            finally:
+                if wb is not None:
+                    try:
+                        wb.close()
+                    except Exception:
+                        pass
             
-            # Add to tracked users list
-            added = add_tracked_user(ign)
+            # Add to tracked users list using the properly-cased username
+            added = add_tracked_user(actual_ign)
             
             if added:
-                await interaction.followup.send(f"{ign} is now being tracked. Use `/claim ign:{ign}` to link this username to your Discord account.")
+                await interaction.followup.send(f"{actual_ign} is now being tracked. Use `/claim ign:{actual_ign}` to link this username to your Discord account.")
             else:
-                await interaction.followup.send(f"{ign} is already being tracked.")
+                await interaction.followup.send(f"{actual_ign} is already being tracked.")
         else:
             err = (result.stderr or result.stdout) or "Unknown error"
             print(f"[ERROR] api_get.py failed for {ign}:")
@@ -1841,6 +2377,66 @@ async def unclaim(interaction: discord.Interaction, ign: str):
             
     except Exception as e:
         await interaction.followup.send(f"[ERROR] Failed to unclaim: {str(e)}")
+
+@bot.tree.command(name="untrack", description="Remove all tracking data for a Minecraft username")
+@discord.app_commands.describe(ign="Minecraft IGN to untrack")
+async def untrack(interaction: discord.Interaction, ign: str):
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            return
+    
+    # Check if user is authorized to untrack this username (must have it claimed)
+    if not is_user_authorized(interaction.user.id, ign):
+        await interaction.followup.send(f"[ERROR] You are not authorized to untrack {ign}. Only the user who claimed this username can untrack it.")
+        return
+    
+    try:
+        # Find the properly-cased username from Excel file
+        excel_file = BOT_DIR / "stats.xlsx"
+        actual_ign = ign
+        if excel_file.exists():
+            wb = None
+            try:
+                wb = load_workbook(str(excel_file))
+                key = ign.casefold()
+                for sheet_name in wb.sheetnames:
+                    if sheet_name.casefold() == key:
+                        actual_ign = sheet_name
+                        break
+            except Exception:
+                pass
+            finally:
+                if wb is not None:
+                    try:
+                        wb.close()
+                    except Exception:
+                        pass
+        
+        # Remove from all locations
+        removed_tracked = remove_tracked_user(actual_ign)
+        removed_link = unlink_user_from_ign(actual_ign)
+        removed_color = remove_user_color(actual_ign)
+        removed_sheet = delete_user_sheet(actual_ign)
+        
+        if removed_tracked or removed_link or removed_color or removed_sheet:
+            results = []
+            if removed_tracked:
+                results.append("tracked users list")
+            if removed_link:
+                results.append("user links")
+            if removed_color:
+                results.append("user colors")
+            if removed_sheet:
+                results.append("stats sheet")
+            
+            await interaction.followup.send(f"Successfully untracked {actual_ign}. Removed from: {', '.join(results)}.")
+        else:
+            await interaction.followup.send(f"[WARNING] {ign} was not found in any tracking data.")
+            
+    except Exception as e:
+        await interaction.followup.send(f"[ERROR] Failed to untrack: {str(e)}")
 
 # Create color choices from MINECRAFT_CODE_TO_HEX
 COLOR_CHOICES = [
@@ -2079,13 +2675,44 @@ async def prestige(interaction: discord.Interaction, level: int, ign: str = None
         await interaction.followup.send(f"[ERROR] {str(e)}")
 
 
+@bot.tree.command(name="instructions", description="Display bot usage instructions")
+async def instructions(interaction: discord.Interaction):
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            return
+    
+    try:
+        instructions_file = BOT_DIR / "instructions.txt"
+        if not instructions_file.exists():
+            await interaction.followup.send("[ERROR] Instructions file not found")
+            return
+        
+        with open(instructions_file, "r", encoding="utf-8") as f:
+            content = f.read()
+        
+        # Discord has a 2000 character limit for messages
+        if len(content) > 1900:
+            # Split into chunks if needed
+            chunks = [content[i:i+1900] for i in range(0, len(content), 1900)]
+            for chunk in chunks:
+                await interaction.followup.send(chunk)
+        else:
+            await interaction.followup.send(content)
+    except Exception as e:
+        await interaction.followup.send(f"[ERROR] {str(e)}")
+
+
 @bot.tree.command(name="refresh", description="Manually run batch snapshot update for all tracked users")
-@discord.app_commands.describe(mode="One of: daily, yesterday, monthly, or all")
+@discord.app_commands.describe(mode="One of: session, daily, yesterday, monthly, all, or all+session")
 @discord.app_commands.choices(mode=[
+    discord.app_commands.Choice(name="session", value="session"),
     discord.app_commands.Choice(name="daily", value="daily"),
     discord.app_commands.Choice(name="yesterday", value="yesterday"),
     discord.app_commands.Choice(name="monthly", value="monthly"),
     discord.app_commands.Choice(name="all (daily + yesterday + monthly)", value="all"),
+    discord.app_commands.Choice(name="all+session (session + daily + yesterday + monthly)", value="all-session"),
 ])
 async def refresh(interaction: discord.Interaction, mode: discord.app_commands.Choice[str]):
     if not interaction.response.is_done():
@@ -2094,9 +2721,9 @@ async def refresh(interaction: discord.Interaction, mode: discord.app_commands.C
         except (discord.errors.NotFound, discord.errors.HTTPException):
             return
     try:
-        # Run batch_update.py with selected schedule
+        # Run batch_update.py with selected schedule (use extended timeout)
         def run_batch():
-            return run_script("batch_update.py", ["-schedule", mode.value])
+            return run_script_batch("batch_update.py", ["-schedule", mode.value])
         
         result = await asyncio.to_thread(run_batch)
         
@@ -2113,6 +2740,8 @@ async def refresh(interaction: discord.Interaction, mode: discord.app_commands.C
         except Exception:
             # Fallback to ephemeral if DMs are closed
             await interaction.followup.send(msg, ephemeral=True)
+    except subprocess.TimeoutExpired:
+        await interaction.followup.send(f"[ERROR] Batch update timed out after 5 minutes. Try a smaller schedule (e.g., just 'daily' or 'session').", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"[ERROR] {str(e)}", ephemeral=True)
 
@@ -2140,10 +2769,26 @@ async def sheepwars(interaction: discord.Interaction, ign: str):
         print(f"[DEBUG] api_get.py stdout: {result.stdout if result.stdout else 'None'}")
         print(f"[DEBUG] api_get.py stderr: {result.stderr if result.stderr else 'None'}")
         
+        # Check if we got rate limited (429)
+        if result.returncode == 0 and result.stdout:
+            try:
+                output = json.loads(result.stdout)
+                if output.get("skipped") and output.get("reason") == "rate_limited":
+                    # Rate limited - use existing data from Excel instead of failing
+                    print(f"[DEBUG] Rate limited for {ign}, using existing data")
+            except (json.JSONDecodeError, ValueError):
+                # Not JSON output, continue normally
+                pass
+        
         if result.returncode != 0:
-            error_msg = result.stderr or result.stdout or "Unknown error"
-            await interaction.followup.send(f"[ERROR] Failed to fetch stats:\n```{error_msg[:500]}```")
-            return
+            # Check if it's a rate limit error
+            if result.stderr and "429" in result.stderr:
+                # Rate limited - try to use existing data
+                print(f"[DEBUG] Rate limited for {ign}, attempting to use existing data")
+            else:
+                error_msg = result.stderr or result.stdout or "Unknown error"
+                await interaction.followup.send(f"[ERROR] Failed to fetch stats:\n```{error_msg[:500]}```")
+                return
         
         # Read Excel file and get stats
         EXCEL_FILE = BOT_DIR / "stats.xlsx"
@@ -2151,59 +2796,90 @@ async def sheepwars(interaction: discord.Interaction, ign: str):
             await interaction.followup.send("[ERROR] Excel file not found")
             return
         
-        wb = load_workbook(EXCEL_FILE)
-        
-        # Find sheet case-insensitively
-        key = ign.casefold()
-        found_sheet = None
-        actual_ign = ign  # Store the actual sheet name (proper case)
-        for sheet_name in wb.sheetnames:
-            if sheet_name.casefold() == key:
-                found_sheet = wb[sheet_name]
-                actual_ign = sheet_name  # Get the properly cased username
-                break
-        
-        if found_sheet is None:
-            await interaction.followup.send(f"[ERROR] Player sheet '{ign}' not found")
-            return
-        
-        # Pull level and prestige icon for title decoration
+        wb = None
         try:
-            # Prefer explicit 'level' row if present; fallback to deriving from 'experience'
-            level_value = 0
-            level_row = None
-            exp_row = None
-            for i in range(1, 100):
-                name = found_sheet[f'A{i}'].value
-                if not name:
-                    continue
-                key = str(name).lower()
-                if key == 'level' and level_row is None:
-                    level_row = i
-                elif key == 'experience' and exp_row is None:
-                    exp_row = i
-            if level_row is not None:
-                level_value = int(found_sheet[f'B{level_row}'].value or 0)
-            elif exp_row is not None:
-                exp = found_sheet[f'B{exp_row}'].value or 0
-                level_value = int((exp or 0) / 5000)
-        except Exception:
-            level_value = 0
-        prestige_icon = get_prestige_icon(level_value)
+            wb = load_workbook(EXCEL_FILE)
+            
+            # Find sheet case-insensitively
+            key = ign.casefold()
+            found_sheet = None
+            actual_ign = ign  # Store the actual sheet name (proper case)
+            for sheet_name in wb.sheetnames:
+                if sheet_name.casefold() == key:
+                    found_sheet = wb[sheet_name]
+                    actual_ign = sheet_name  # Get the properly cased username
+                    break
+            
+            if found_sheet is None:
+                await interaction.followup.send(f"[ERROR] Player sheet '{ign}' not found")
+                return
+            
+            # Pull level and prestige icon for title decoration
+            try:
+                # Prefer explicit 'level' row if present; fallback to deriving from 'experience'
+                level_value = 0
+                level_row = None
+                exp_row = None
+                for i in range(1, 100):
+                    name = found_sheet[f'A{i}'].value
+                    if not name:
+                        continue
+                    key = str(name).lower()
+                    if key == 'level' and level_row is None:
+                        level_row = i
+                    elif key == 'experience' and exp_row is None:
+                        exp_row = i
+                if level_row is not None:
+                    level_value = int(found_sheet[f'B{level_row}'].value or 0)
+                elif exp_row is not None:
+                    exp = found_sheet[f'B{exp_row}'].value or 0
+                    level_value = int((exp or 0) / 5000)
+            except Exception:
+                level_value = 0
+            prestige_icon = get_prestige_icon(level_value)
 
-        # Create view with tabs using actual_ign (properly cased)
-        view = StatsTabView(found_sheet, actual_ign, level_value, prestige_icon)
-        
-        # Reload color after API fetch (api_get.py may have just saved rank/color)
-        view._load_color()
-        
-        embed, file = view.generate_composite_image("all-time")
-        
-        if file:
-            await interaction.followup.send(view=view, file=file)
-        else:
-            await interaction.followup.send(embed=embed, view=view)
-        wb.close()
+            # Check if user is being tracked
+            tracked_users = load_tracked_users()
+            is_tracked = any(u.casefold() == actual_ign.casefold() for u in tracked_users)
+            print(f"[SHEEPWARS] User '{actual_ign}' is_tracked={is_tracked}")
+            print(f"[SHEEPWARS] Tracked users: {tracked_users}")
+            
+            # Create view with tabs using actual_ign (properly cased)
+            view = StatsTabView(found_sheet, actual_ign, level_value, prestige_icon)
+            
+            # Reload color after API fetch (api_get.py may have just saved rank/color)
+            view._load_color()
+            
+            embed, file = view.generate_composite_image("all-time")
+            
+            if file:
+                if is_tracked:
+                    # Show view with buttons for tracked users
+                    await interaction.followup.send(view=view, file=file)
+                else:
+                    # No view for untracked users, show message instead
+                    message = f"{actual_ign} is not being tracked. Use `/track ign:{actual_ign}` first to see delta-based stats."
+                    await interaction.followup.send(content=message, file=file)
+                    # Schedule cleanup for untracked user after 1 minute
+                    print(f"[SHEEPWARS] Scheduling cleanup for untracked user '{actual_ign}' (has file)")
+                    bot.loop.create_task(cleanup_untracked_user_delayed(actual_ign, delay_seconds=60))
+                    return
+            else:
+                if is_tracked:
+                    await interaction.followup.send(embed=embed, view=view)
+                else:
+                    message = f"{actual_ign} is not being tracked. Use `/track ign:{actual_ign}` first to see delta-based stats."
+                    await interaction.followup.send(content=message, embed=embed)
+                    # Schedule cleanup for untracked user after 1 minute
+                    print(f"[SHEEPWARS] Scheduling cleanup for untracked user '{actual_ign}' (no file)")
+                    bot.loop.create_task(cleanup_untracked_user_delayed(actual_ign, delay_seconds=60))
+                    return
+        finally:
+            if wb is not None:
+                try:
+                    wb.close()
+                except Exception:
+                    pass
         
     except subprocess.TimeoutExpired:
         await interaction.followup.send("[ERROR] Command timed out (30s limit)")
@@ -2235,6 +2911,7 @@ async def leaderboard(interaction: discord.Interaction, metric: discord.app_comm
             await interaction.response.defer()
         except (discord.errors.NotFound, discord.errors.HTTPException):
             return
+    wb = None
     try:
         EXCEL_FILE = "stats.xlsx"
         if not os.path.exists(EXCEL_FILE):
@@ -2242,10 +2919,19 @@ async def leaderboard(interaction: discord.Interaction, metric: discord.app_comm
             return
         wb = load_workbook(EXCEL_FILE)
         view = LeaderboardView(metric.value, wb)
-        embed = view.get_leaderboard_embed("lifetime")
-        await interaction.followup.send(embed=embed, view=view)
+        embed, file = view.generate_leaderboard_image("lifetime")
+        if file:
+            await interaction.followup.send(view=view, file=file)
+        else:
+            await interaction.followup.send(embed=embed, view=view)
     except Exception as e:
         await interaction.followup.send(f"[ERROR] {str(e)}")
+    finally:
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception:
+                pass
 
 
 @bot.tree.command(name="kill-leaderboard", description="View kills leaderboard by type")
@@ -2263,6 +2949,7 @@ async def kill_leaderboard(interaction: discord.Interaction, metric: discord.app
             await interaction.response.defer()
         except (discord.errors.NotFound, discord.errors.HTTPException):
             return
+    wb = None
     try:
         EXCEL_FILE = "stats.xlsx"
         if not os.path.exists(EXCEL_FILE):
@@ -2274,6 +2961,12 @@ async def kill_leaderboard(interaction: discord.Interaction, metric: discord.app
         await interaction.followup.send(embed=embed, view=view)
     except Exception as e:
         await interaction.followup.send(f"[ERROR] {str(e)}")
+    finally:
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception:
+                pass
 
 
 @bot.tree.command(name="death-leaderboard", description="View deaths leaderboard by type")
@@ -2291,6 +2984,7 @@ async def death_leaderboard(interaction: discord.Interaction, metric: discord.ap
             await interaction.response.defer()
         except (discord.errors.NotFound, discord.errors.HTTPException):
             return
+    wb = None
     try:
         EXCEL_FILE = "stats.xlsx"
         if not os.path.exists(EXCEL_FILE):
@@ -2302,6 +2996,12 @@ async def death_leaderboard(interaction: discord.Interaction, metric: discord.ap
         await interaction.followup.send(embed=embed, view=view)
     except Exception as e:
         await interaction.followup.send(f"[ERROR] {str(e)}")
+    finally:
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception:
+                pass
 
 
 @bot.tree.command(name="prestiges", description="List all prestige prefixes with their colors")
