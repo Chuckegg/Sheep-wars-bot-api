@@ -41,8 +41,11 @@ def transfer_stats(source_file='sheep_wars_stats.xlsx', dest_file='stats.xlsx'):
         print(f"Error: Destination file '{dest_file}' not found!")
         return False
     
+    source_wb = None
+    dest_wb = None
+    
     try:
-        # Load both workbooks
+        # Load both workbooks with failsafe - always close even on error
         print(f"Loading {source_file}...")
         source_wb = load_workbook(source_file, data_only=True)
         
@@ -101,11 +104,19 @@ def transfer_stats(source_file='sheep_wars_stats.xlsx', dest_file='stats.xlsx'):
         return False
     
     finally:
-        # Close workbooks
-        if 'source_wb' in locals():
-            source_wb.close()
-        if 'dest_wb' in locals():
-            dest_wb.close()
+        # FAILSAFE: Always close workbooks even if an error occurs
+        if source_wb is not None:
+            try:
+                source_wb.close()
+                print("[CLEANUP] Source workbook closed")
+            except Exception as close_err:
+                print(f"[WARNING] Error closing source workbook: {close_err}")
+        if dest_wb is not None:
+            try:
+                dest_wb.close()
+                print("[CLEANUP] Destination workbook closed")
+            except Exception as close_err:
+                print(f"[WARNING] Error closing destination workbook: {close_err}")
 
 if __name__ == "__main__":
     transfer_stats()

@@ -94,6 +94,7 @@ def rotate_daily_to_yesterday() -> dict:
     
     wb = None
     try:
+        # FAILSAFE: Load workbook with guaranteed cleanup
         wb = load_workbook(EXCEL_FILE)
         users = load_tracked_users()
         results = {}
@@ -143,12 +144,16 @@ def rotate_daily_to_yesterday() -> dict:
         
     except Exception as e:
         print(f"[ERROR] Exception during rotate_daily_to_yesterday: {e}", flush=True)
+        return {}
+        
+    finally:
+        # FAILSAFE: Always close workbook even if an error occurs
         if wb is not None:
             try:
                 wb.close()
-            except Exception:
-                pass
-        return {}
+                print("[CLEANUP] Workbook closed", flush=True)
+            except Exception as close_err:
+                print(f"[WARNING] Error closing workbook: {close_err}", flush=True)
 
 
 def run_api_get(username: str, api_key: str, snapshot_flags: list[str]) -> bool:

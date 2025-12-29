@@ -25,3 +25,4 @@ tzdata==2025.3
 urllib3==2.6.2
 yarl==1.22.0
 Pillow>=9.0.0
+python-socketio==5.11.3

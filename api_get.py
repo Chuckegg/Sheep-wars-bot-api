@@ -265,6 +265,8 @@ def ensure_workbook(path: str):
     
     If file is temporarily locked or corrupted due to concurrent access,
     retry a few times before giving up.
+    
+    IMPORTANT: Caller is responsible for closing the workbook in a finally block.
     """
     max_retries = 3
     retry_delay = 0.5  # seconds
@@ -272,6 +274,7 @@ def ensure_workbook(path: str):
     for attempt in range(max_retries):
         if os.path.exists(path):
             try:
+                # FAILSAFE: Load with error handling - caller must close in finally block
                 return load_workbook(path)
             except Exception as e:
                 if attempt < max_retries - 1:
@@ -486,9 +489,90 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
         data = get_hypixel_player(uuid, api_key)
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 429:
-            print(f"[WARNING] Rate limited (429) for {username}. Skipping update.")
-            # Return empty dict to indicate we skipped the update without error
-            return {"skipped": True, "reason": "rate_limited", "username": username}
+            print(f"[WARNING] Rate limited (429) for {username}. Attempting snapshot fallback.")
+            snapshots_written = False
+            wb = None
+            try:
+                # FAILSAFE: Load workbook with guaranteed cleanup
+                wb = ensure_workbook(EXCEL_FILE)
+
+                # Find the user's sheet case-insensitively
+                target_sheet = None
+                key = username.casefold()
+                for sheet_name in wb.sheetnames:
+                    if sheet_name.casefold() == key:
+                        target_sheet = wb[sheet_name]
+                        break
+
+                # Verify single-table layout headers
+                def is_single_table_layout(ws) -> bool:
+                    expected = [
+                        "Stat",
+                        "All-time",
+                        "Session Delta",
+                        "Session Snapshot",
+                        "Daily Delta",
+                        "Daily Snapshot",
+                        "Yesterday Delta",
+                        "Yesterday Snapshot",
+                        "Monthly Delta",
+                        "Monthly Snapshot",
+                    ]
+                    for i, title in enumerate(expected, start=1):
+                        cell_val = (ws.cell(row=1, column=i).value or "").strip()
+                        if cell_val != title:
+                            return False
+                    return True
+
+                # Write snapshots from existing All-time values and zero deltas
+                if target_sheet and is_single_table_layout(target_sheet) and snapshot_sections:
+                    at_col = 2
+                    sess_delta_col, sess_snap_col = 3, 4
+                    daily_delta_col, daily_snap_col = 5, 6
+                    yest_delta_col, yest_snap_col = 7, 8
+                    mon_delta_col, mon_snap_col = 9, 10
+
+                    for row in range(2, target_sheet.max_row + 1):
+                        cur = target_sheet.cell(row=row, column=at_col).value or 0
+                        if "session" in snapshot_sections:
+                            target_sheet.cell(row=row, column=sess_snap_col, value=cur)
+                            target_sheet.cell(row=row, column=sess_delta_col, value=0)
+                        if "daily" in snapshot_sections:
+                            target_sheet.cell(row=row, column=daily_snap_col, value=cur)
+                            target_sheet.cell(row=row, column=daily_delta_col, value=0)
+                        if "yesterday" in snapshot_sections:
+                            target_sheet.cell(row=row, column=yest_snap_col, value=cur)
+                            target_sheet.cell(row=row, column=yest_delta_col, value=0)
+                        if "monthly" in snapshot_sections:
+                            target_sheet.cell(row=row, column=mon_snap_col, value=cur)
+                            target_sheet.cell(row=row, column=mon_delta_col, value=0)
+
+                    if not safe_save_workbook(wb, EXCEL_FILE):
+                        print("[ERROR] Snapshot fallback save failed.")
+                    else:
+                        snapshots_written = True
+                else:
+                    print("[INFO] No suitable sheet/layout found for snapshot fallback.")
+
+            except Exception as fe:
+                print(f"[ERROR] Snapshot fallback failed: {fe}")
+                
+            finally:
+                # FAILSAFE: Always close workbook even if an error occurs
+                if wb is not None:
+                    try:
+                        wb.close()
+                        print("[CLEANUP] Fallback workbook closed")
+                    except Exception as close_err:
+                        print(f"[WARNING] Error closing fallback workbook: {close_err}")
+
+            # Return structured result indicating fallback outcome
+            return {
+                "skipped": True,
+                "reason": "rate_limited",
+                "username": username,
+                "snapshots_written": snapshots_written,
+            }
         else:
             # Re-raise other HTTP errors
             raise
@@ -528,6 +612,7 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
     save_user_color_and_rank(proper_username, rank, guild_tag, guild_color)
 
     # Open workbook (create if missing) and create/select player's sheet
+    # FAILSAFE: Workbook is guaranteed to be closed in the finally block below
     wb = ensure_workbook(EXCEL_FILE)
     
     try:
@@ -639,13 +724,7 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
             # Reserve delta and snapshot cells. We'll compute numeric deltas after
             # snapshot columns are optionally updated below so deltas reflect
             # the correct (current - snapshot_before_update) values or zero when
-            # snapshot is set to current.
-            if new_sheet:
-                # initialize snapshot cells to None for clarity
-                ws.cell(row=row, column=sess_snap_col, value=None)
-                ws.cell(row=row, column=daily_snap_col, value=None)
-                ws.cell(row=row, column=yest_snap_col, value=None)
-                ws.cell(row=row, column=mon_snap_col, value=None)
+            # snapshot is set to currently set to empty
             # leave delta cells empty for now
             ws.cell(row=row, column=sess_delta_col, value=None)
             ws.cell(row=row, column=daily_delta_col, value=None)
@@ -735,13 +814,18 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
         }
     
     except Exception as e:
-        # Always close the workbook if an error occurs
+        # Log the error and re-raise
         print(f"[ERROR] Exception occurred during Excel update: {e}")
-        try:
-            wb.close()
-        except Exception:
-            pass
         raise
+        
+    finally:
+        # FAILSAFE: Always close the workbook even if an error occurs
+        if wb is not None:
+            try:
+                wb.close()
+                print("[CLEANUP] Workbook closed")
+            except Exception as close_err:
+                print(f"[WARNING] Error closing workbook: {close_err}")
 
 
 def main():

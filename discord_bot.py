@@ -27,6 +27,89 @@ CREATOR_NAME = "chuckegg"
 CREATOR_ID = "542467909549555734"
 CREATOR_TZ = ZoneInfo("America/New_York")
 
+# Font cache to avoid repeatedly searching for fonts
+_FONT_CACHE = {}
+
+def _get_font_path(font_name: str) -> str:
+    """Find the full path to a TrueType font file.
+    
+    Searches local fonts directory first, then common system font directories 
+    on Windows, Linux, and macOS.
+    
+    Args:
+        font_name: Name of the font file (e.g., 'DejaVuSans.ttf')
+    
+    Returns:
+        Full path to the font file if found, otherwise returns the font_name as-is
+        (will fall back to default font if not found)
+    """
+    if font_name in _FONT_CACHE:
+        return _FONT_CACHE[font_name]
+    
+    # Check local fonts directory first (bundled with bot)
+    local_fonts_dir = os.path.join(BOT_DIR, 'fonts')
+    local_font_path = os.path.join(local_fonts_dir, font_name)
+    if os.path.exists(local_font_path):
+        _FONT_CACHE[font_name] = local_font_path
+        return local_font_path
+    
+    # Common font directories by OS
+    font_dirs = []
+    
+    if sys.platform == 'win32':
+        # Windows font directories
+        font_dirs = [
+            os.path.expandvars(r'%WINDIR%\Fonts'),
+            os.path.expandvars(r'%SystemRoot%\Fonts'),
+        ]
+    elif sys.platform == 'darwin':
+        # macOS font directories
+        font_dirs = [
+            os.path.expanduser('~/Library/Fonts'),
+            '/Library/Fonts',
+            '/System/Library/Fonts',
+        ]
+    else:
+        # Linux and other Unix-like systems
+        font_dirs = [
+            os.path.expanduser('~/.fonts'),
+            '/usr/share/fonts',
+            '/usr/local/share/fonts',
+            '/usr/share/fonts/truetype',
+            '/usr/share/fonts/truetype/dejavu',
+        ]
+    
+    # Search for the font
+    for directory in font_dirs:
+        font_path = os.path.join(directory, font_name)
+        if os.path.exists(font_path):
+            _FONT_CACHE[font_name] = font_path
+            return font_path
+    
+    # If not found, return the original name and let Pillow handle it
+    _FONT_CACHE[font_name] = font_name
+    return font_name
+
+def _load_font(font_name: str, font_size: int):
+    """Load a TrueType font with fallback to default font.
+    
+    Args:
+        font_name: Name of the font file (e.g., 'DejaVuSans.ttf')
+        font_size: Size of the font in points
+    
+    Returns:
+        A Pillow ImageFont object
+    """
+    if Image is None:
+        raise RuntimeError("Pillow not available")
+    
+    try:
+        font_path = _get_font_path(font_name)
+        return ImageFont.truetype(font_path, font_size)
+    except Exception:
+        # Fall back to default font if TrueType loading fails
+        return ImageFont.load_default()
+
 def safe_save_workbook(wb, filepath: str) -> bool:
     """Safely save a workbook with backup and error recovery.
     
@@ -490,29 +573,29 @@ PRESTIGE_RAW_PATTERNS = {
     600: "&3[600⚡]",
     700: "&5[700✠]",
     800: "&d[800⏹]",
-    900: "&9[&69&e0&20&3✏&d]",
+    900: "&c[&69&e0&a0&b✏&d]",
     1000: "&0[&f1000☯&0]",
-    1100: "&0[&71100☃️&0]",
+    1100: "&0[&81100☃️&0]",
     1200: "&0[&c1200۞&0]",
     1300: "&0[&61300✤&0]",
     1400: "&0[&e1400♫&0]",
     1500: "&0[&a1500♚&0]",
     1600: "&0[&31600❉&0]",
-    1700: "&0[&d1700Σ&0]",
-    1800: "&0[&51800￡&0]",
+    1700: "&0[&51700Σ&0]",
+    1800: "&0[&d1800￡&0]",
     1900: "&c[&61&e9&a0&30&5✖&d]",
     2000: "&0[2&80&700&f❁]",
     2100: "&f[2&710&80&0✚]",
     2200: "&f[2&e20&60&c✯]",
-    2300: "&6[2&e30&a0&b✆]",
-    2400: "&a[2&b40&30&5❥]",
+    2300: "&c[2&630&e0&a✆]",
+    2400: "&b[2&340&50&d❥]",
     2500: "&f[2&a500&2☾⋆⁺]",
-    2600: "&f[2&b60&30⚜&1]",
+    2600: "&f[2&b60&30&9⚜&1]",
     2700: "&f[2&d700&5✦]",
-    2800: "&3[2&580&d0&e⚝]",
+    2800: "&c[2&480&50&d⚝]",
     2900: "&d[&52&39&a0&e0&6✉&c]",
     3000: "&f[&03&80&00&80&0ツ&f]",
-    3100: "&0[&F3&71&F0&70&F❣&0]",
+    3100: "&0[&f3&71&f0&70&f❣&0]",
     3200: "&0[&c3&42&c0&40&c✮&0]",
     3300: "&0[&63&c3&60&c0&6✿&0]",
     3400: "&0[&e3&64&e0&60&e✲&0]",
@@ -523,7 +606,6 @@ PRESTIGE_RAW_PATTERNS = {
     3900: "&4[&63&e9&20&10&5Φ&d]",
     4000: "&0[4&80&70&80&0✌]",
 }
-
 
 def _parse_raw_pattern(raw: str) -> list:
     """Parse a raw pattern into list of (code, text) pieces."""
@@ -665,10 +747,7 @@ def _render_text_segments_to_image(segments: list, font=None, padding=(8,6)) -> 
     if Image is None:
         raise RuntimeError("Pillow not available")
     if font is None:
-        try:
-            font = ImageFont.truetype("DejaVuSans.ttf", 18)
-        except Exception:
-            font = ImageFont.load_default()
+        font = _load_font("DejaVuSans.ttf", 18)
 
     # Measure total size
     total_w = 0
@@ -716,10 +795,7 @@ def _render_text_segments_to_image_multiline(lines: list, font=None, padding=(8,
     if Image is None:
         raise RuntimeError("Pillow not available")
     if font is None:
-        try:
-            font = ImageFont.truetype("DejaVuSans.ttf", 26)
-        except Exception:
-            font = ImageFont.load_default()
+        font = _load_font("DejaVuSans.ttf", 26)
 
     draw_dummy = ImageDraw.Draw(Image.new('RGBA', (1,1)))
     
@@ -779,16 +855,8 @@ def render_stat_box(label: str, value: str, width: int = 200, height: int = 80):
     img = Image.new('RGB', (width, height), (0, 0, 0))
     draw = ImageDraw.Draw(img)
     
-    try:
-        label_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 16)
-        value_font = ImageFont.truetype("DejaVuSans.ttf", 24)
-    except Exception:
-        try:
-            label_font = ImageFont.truetype("DejaVuSans.ttf", 16)
-            value_font = ImageFont.truetype("DejaVuSans.ttf", 24)
-        except Exception:
-            label_font = ImageFont.load_default()
-            value_font = ImageFont.load_default()
+    label_font = _load_font("DejaVuSans-Bold.ttf", 16)
+    value_font = _load_font("DejaVuSans.ttf", 24)
     
     # Draw label (centered horizontally, near top)
     label_bbox = draw.textbbox((0, 0), label, font=label_font)
@@ -875,6 +943,145 @@ def create_stats_composite_image(level: int, icon: str, ign: str, tab_name: str,
     return out
 
 
+def create_full_stats_image(ign: str, tab_name: str, level: int, icon: str, stats: dict,
+                             ign_color: str = None, guild_tag: str = None, guild_color: str = None) -> io.BytesIO:
+    """Render the full stats layout defined in Template.xlsx.
+
+    Layout rules:
+    - First 2 lines: 3 boxes each
+    - Third line: 1 box (title)
+    - Remaining lines: 5 boxes each
+    """
+    if Image is None:
+        raise RuntimeError("Pillow not available")
+
+    # Title image with prestige icon and tab name
+    title_io = render_prestige_with_text(level, icon, ign, f"{tab_name.title()} Stats", ign_color, guild_tag, guild_color, two_line=True)
+    title_img = Image.open(title_io)
+
+    box_width = 200
+    box_height = 80
+    spacing = 10
+    max_boxes = 5
+    line_width_max = box_width * max_boxes + spacing * (max_boxes - 1)
+
+    # Build lines from the template-driven order
+    lines = [
+        [
+            ("Exp/Hour", stats.get("exp_per_hour", "0")),
+            ("Playtime", stats.get("playtime", "0")),
+            ("Exp/Game", stats.get("exp_per_game", "0")),
+        ],
+        [
+            ("Wins", stats.get("wins", "0")),
+            ("Losses", stats.get("losses", "0")),
+            ("WLR", stats.get("wlr", "0")),
+            ("Layers", stats.get("layers", "0")),
+            ("Coins", stats.get("coins", "0")),
+        ],
+        [
+            ("Kills", stats.get("kills", "0")),
+            ("Deaths", stats.get("deaths", "0")),
+            ("KDR", stats.get("kdr", "0")),
+            ("Kill/Game", stats.get("kills_per_game", "0")),
+            ("Kill/Win", stats.get("kills_per_win", "0")),
+        ],
+        [
+            ("Damage dealt", stats.get("damage", "0")),
+            ("Damage/Game", stats.get("damage_per_game", "0")),
+            ("Void kills", stats.get("void_kills", "0")),
+            ("Void deaths", stats.get("void_deaths", "0")),
+            ("Void KDR", stats.get("void_kdr", "0")),
+        ],
+        [
+            ("Magic wools", stats.get("magic_wools", "0")),
+            ("Wools/Game", stats.get("wools_per_game", "0")),
+            ("Explosive kills", stats.get("explosive_kills", "0")),
+            ("Explosive deaths", stats.get("explosive_deaths", "0")),
+            ("Explosive KDR", stats.get("explosive_kdr", "0")),
+        ],
+        [
+            ("Sheeps thrown", stats.get("sheeps_thrown", "0")),
+            ("Sheeps thrown/Game", stats.get("sheeps_per_game", "0")),
+            ("Bow kills", stats.get("bow_kills", "0")),
+            ("Bow deaths", stats.get("bow_deaths", "0")),
+            ("Bow KDR", stats.get("bow_kdr", "0")),
+        ],
+        [
+            ("Games Played", stats.get("games_played", "0")),
+            ("Draws", stats.get("draws", "0")),
+            ("Meelee kills", stats.get("melee_kills", "0")),
+            ("Meelee Deaths", stats.get("melee_deaths", "0")),
+            ("Meelee KDR", stats.get("melee_kdr", "0")),
+        ],
+    ]
+
+    # Render all boxes first (playtime wider in middle of first row)
+    rendered_lines = []
+    for line_idx, line in enumerate(lines):
+        rendered = []
+        for col_idx, (label, value) in enumerate(line):
+            try:
+                if label.lower() == "playtime":
+                    # Playtime box is wider (middle box in row 0)
+                    rendered.append(render_stat_box(label, str(value), width=280, height=box_height))
+                else:
+                    rendered.append(render_stat_box(label, str(value), width=box_width, height=box_height))
+            except Exception as e:
+                print(f"[WARNING] Failed to render box {label}: {e}")
+        rendered_lines.append(rendered)
+
+    # Compute overall dimensions
+    line_heights = []
+    line_widths = []
+    for line in rendered_lines:
+        line_height = box_height
+        # Calculate width accounting for playtime being wider
+        line_width = 0
+        for i, box in enumerate(line):
+            line_width += box.width
+            if i < len(line) - 1:
+                line_width += spacing
+        line_heights.append(line_height)
+        line_widths.append(line_width)
+
+    grid_height = sum(line_heights) + spacing * (len(rendered_lines) - 1)
+    grid_width = line_width_max
+
+    # Scale title if too wide
+    title_width = title_img.width
+    title_height = title_img.height
+    if title_width > grid_width:
+        scale_factor = grid_width / title_width
+        title_width = grid_width
+        title_height = int(title_img.height * scale_factor)
+        title_img = title_img.resize((title_width, title_height), Image.LANCZOS)
+
+    title_x_offset = (grid_width - title_width) // 2
+    composite_width = grid_width
+    bottom_padding = 20
+    composite_height = title_height + spacing + grid_height + bottom_padding
+
+    composite = Image.new('RGB', (composite_width, composite_height), (0, 0, 0))
+    composite.paste(title_img, (title_x_offset, 0), title_img if title_img.mode == 'RGBA' else None)
+
+    # Paste lines centered horizontally
+    y_offset = title_height + spacing
+    for idx, line in enumerate(rendered_lines):
+        line_width = line_widths[idx]
+        x_start = (grid_width - line_width) // 2 if line_width > 0 else 0
+        x = x_start
+        for box in line:
+            composite.paste(box, (x, y_offset))
+            x += box.width + spacing
+        y_offset += line_heights[idx] + spacing
+
+    out = io.BytesIO()
+    composite.save(out, format='PNG')
+    out.seek(0)
+    return out
+
+
 def create_leaderboard_image(tab_name: str, metric_label: str, leaderboard_data: list) -> io.BytesIO:
     """Create a leaderboard image similar to the SheepWars format.
     
@@ -910,10 +1117,10 @@ def create_leaderboard_image(tab_name: str, metric_label: str, leaderboard_data:
     
     # Fonts
     try:
-        title_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 28)
-        header_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 20)
-        data_font = ImageFont.truetype("DejaVuSans.ttf", 18)
-        prestige_font = ImageFont.truetype("DejaVuSans.ttf", 16)
+        title_font = _load_font("DejaVuSans-Bold.ttf", 28)
+        header_font = _load_font("DejaVuSans-Bold.ttf", 20)
+        data_font = _load_font("DejaVuSans.ttf", 18)
+        prestige_font = _load_font("DejaVuSans.ttf", 16)
     except Exception:
         title_font = ImageFont.load_default()
         header_font = ImageFont.load_default()
@@ -1196,7 +1403,7 @@ def render_all_prestiges_combined(spacing: int = 6) -> io.BytesIO:
     # Optional title at the top
     title_text = "Wool Games prestiges 0-4000"
     try:
-        title_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 22)
+        title_font = _load_font("DejaVuSans-Bold.ttf", 22)
     except Exception:
         title_font = ImageFont.load_default()
     title_bbox = Image.new('RGBA', (1,1))
@@ -1432,6 +1639,7 @@ def delete_user_sheet(ign: str) -> bool:
         if not excel_file.exists():
             return False
         
+        # FAILSAFE: Load workbook with guaranteed cleanup
         wb = load_workbook(str(excel_file))
         key = ign.casefold()
         sheet_to_delete = None
@@ -1449,20 +1657,20 @@ def delete_user_sheet(ign: str) -> bool:
                 return False
             return True
         
-        # Sheet not found, just close workbook
-        try:
-            wb.close()
-        except Exception:
-            pass
+        # Sheet not found
         return False
+        
     except Exception as e:
         print(f"[ERROR] Failed to delete sheet for {ign}: {e}")
+        return False
+        
+    finally:
+        # FAILSAFE: Always close workbook even if an error occurs
         if wb is not None:
             try:
                 wb.close()
-            except Exception:
-                pass
-        return False
+            except Exception as close_err:
+                print(f"[WARNING] Error closing workbook: {close_err}")
 
 async def cleanup_untracked_user_delayed(ign: str, delay_seconds: int = 60):
     """Schedule cleanup of untracked user data after a delay.
@@ -1595,15 +1803,249 @@ async def staggered_stats_refresher(interval_minutes: int = 10):
             await asyncio.sleep(interval)
 
 
+# Track last known player count for Sheep Wars to calculate delta
+_sheep_wars_last_players = None
+
+
+async def _get_wool_games_status() -> str | None:
+    """Fetch Sheep/Wool Wars player status via HyTrack's socket.io feed.
+
+    Returns a string like "Players: 12 (+1)" or None on failure/timeout.
+    """
+    global _sheep_wars_last_players
+    
+    try:
+        import socketio  # python-socketio
+    except Exception as e:
+        print(f"[PRESENCE] socketio import failed: {e}")
+        return None
+
+    target_key = "WOOL_GAMES__sheep_wars_two_six"
+    status_box = {"value": None}
+    status_event = asyncio.Event()
+
+    def _set_status(entry):
+        global _sheep_wars_last_players
+        if not entry:
+            return
+        if isinstance(entry, list):
+            for item in entry:
+                _set_status(item)
+            return
+        if not isinstance(entry, dict):
+            return
+        info = entry.get("info", {})
+        if info.get("key") != target_key:
+            return
+        players = entry.get("players")
+        if players is None:
+            return
+        
+        # Calculate delta by comparing to last known value
+        if _sheep_wars_last_players is not None:
+            delta = players - _sheep_wars_last_players
+        else:
+            delta = 0
+        
+        # Update last known value
+        _sheep_wars_last_players = players
+        
+        status_box["value"] = f"Sheepers: {players} ({delta:+d})"
+        status_event.set()
+
+    sio = socketio.AsyncClient(reconnection=False, logger=False, engineio_logger=False)
+
+    @sio.event
+    async def connect():
+        try:
+            await sio.emit("requestListing", "WOOL_GAMES")
+        except Exception as e:
+            print(f"[PRESENCE] emit requestListing failed: {e}")
+
+    @sio.on("add")
+    async def on_add(entries):
+        try:
+            _set_status(entries)
+        except Exception as e:
+            pass
+
+    @sio.on("update")
+    async def on_update(update):
+        try:
+            _set_status(update)
+        except Exception as e:
+            pass
+
+    try:
+        await sio.connect("https://hytrack.me", transports=["websocket", "polling"], wait_timeout=5)
+        try:
+            await asyncio.wait_for(status_event.wait(), timeout=8)
+        except asyncio.TimeoutError:
+            pass
+    except Exception as e:
+        print(f"[PRESENCE] socket connect failed: {e}")
+    finally:
+        try:
+            await sio.disconnect()
+        except Exception:
+            pass
+
+    return status_box["value"]
+
+
+async def presence_updater_loop(interval_seconds: int = 5):
+    """Background loop: poll site and update bot presence to show current players."""
+    last = None
+    while True:
+        try:
+            status = await _get_wool_games_status()
+            if status:
+                # If status changed, update presence
+                if status != last:
+                    try:
+                        await bot.change_presence(activity=discord.Game(name=status))
+                        #print(f"[PRESENCE] Updated presence to: {status}")
+                        last = status
+                    except Exception as e:
+                        print(f"[PRESENCE] Failed to change presence: {e}")
+            else:
+                # If no status, optionally clear presence
+                pass
+        except Exception as e:
+            print(f"[PRESENCE] Loop error: {e}")
+        await asyncio.sleep(interval_seconds)
+
+
+def inline_backup_fallback():
+    """Inline backup fallback when backup_hourly.py script fails."""
+    import shutil
+    from datetime import datetime
+    
+    try:
+        excel_file = BOT_DIR / "stats.xlsx"
+        backup_dir = BOT_DIR / "backups"
+        
+        # Try primary backup directory
+        if not backup_dir.exists():
+            try:
+                backup_dir.mkdir(exist_ok=True, mode=0o755)
+            except:
+                # Fallback to home directory
+                from pathlib import Path
+                backup_dir = Path.home() / "backup_api_backups"
+                backup_dir.mkdir(exist_ok=True, mode=0o755)
+                print(f"[FALLBACK] Using alternate directory: {backup_dir}")
+        
+        if not excel_file.exists():
+            print(f"[FALLBACK] Excel file not found: {excel_file}")
+            return False
+        
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-00-00")
+        backup_path = backup_dir / f"stats_{timestamp}.xlsx"
+        
+        if backup_path.exists():
+            print(f"[FALLBACK] Backup already exists: {backup_path.name}")
+            return True
+        
+        # Try multiple copy methods
+        try:
+            shutil.copy2(excel_file, backup_path)
+        except:
+            try:
+                shutil.copy(excel_file, backup_path)
+            except:
+                with open(excel_file, 'rb') as src:
+                    with open(backup_path, 'wb') as dst:
+                        dst.write(src.read())
+        
+        if backup_path.exists():
+            size = backup_path.stat().st_size
+            print(f"[FALLBACK] Backup created: {backup_path.name} ({size:,} bytes)")
+            return True
+        else:
+            print(f"[FALLBACK] Backup was not created")
+            return False
+            
+    except Exception as e:
+        print(f"[FALLBACK] Inline backup error: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 async def scheduler_loop():
-    """Automatic scheduler for daily and monthly snapshots"""
-    last_run = None
+    """Automatic scheduler for daily and monthly snapshots, plus hourly backups"""
+    last_snapshot_run = None
+    last_backup_hour = None
+    
     while True:
         now = datetime.datetime.now(tz=CREATOR_TZ)
+        
+        # Hourly backup - runs at :00 minutes every hour
+        if now.minute == 0:
+            current_hour = (now.date(), now.hour)
+            if last_backup_hour != current_hour:
+                try:
+                    print(f"[SCHEDULER] Running hourly backup at {now.strftime('%I:%M %p')}")
+                    
+                    def run_hourly_backup():
+                        import subprocess
+                        script_path = BOT_DIR / "backup_hourly.py"
+                        # Ensure script is executable on Linux
+                        if not script_path.exists():
+                            raise FileNotFoundError(f"Backup script not found: {script_path}")
+                        
+                        print(f"[SCHEDULER] Backup script path: {script_path}")
+                        print(f"[SCHEDULER] Python executable: {sys.executable}")
+                        print(f"[SCHEDULER] Working directory: {BOT_DIR}")
+                        
+                        return subprocess.run(
+                            [sys.executable, str(script_path)],
+                            cwd=str(BOT_DIR),
+                            capture_output=True,
+                            text=True,
+                            timeout=120
+                        )
+                    
+                    backup_result = await asyncio.to_thread(run_hourly_backup)
+                    if backup_result.returncode == 0:
+                        print(f"[SCHEDULER] Hourly backup completed successfully")
+                        # Show output even on success for debugging
+                        if backup_result.stdout:
+                            print(f"[SCHEDULER] Backup output:\n{backup_result.stdout[:500]}")
+                    else:
+                        print(f"[SCHEDULER] Hourly backup failed with exit code {backup_result.returncode}")
+                        if backup_result.stdout:
+                            print(f"[SCHEDULER] Backup stdout:\n{backup_result.stdout[:500]}")
+                        if backup_result.stderr:
+                            print(f"[SCHEDULER] Backup stderr:\n{backup_result.stderr[:500]}")
+                        
+                        # FALLBACK: Try inline backup
+                        print(f"[FALLBACK] Attempting inline backup...")
+                        try:
+                            await asyncio.to_thread(inline_backup_fallback)
+                            print(f"[FALLBACK] Inline backup completed")
+                        except Exception as fallback_error:
+                            print(f"[FALLBACK] Inline backup also failed: {fallback_error}")
+                except Exception as e:
+                    print(f"[SCHEDULER] Hourly backup error: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    
+                    # FALLBACK: Try inline backup
+                    print(f"[FALLBACK] Attempting inline backup after exception...")
+                    try:
+                        await asyncio.to_thread(inline_backup_fallback)
+                        print(f"[FALLBACK] Inline backup completed")
+                    except Exception as fallback_error:
+                        print(f"[FALLBACK] Inline backup also failed: {fallback_error}")
+                
+                last_backup_hour = current_hour
+        
         # Run snapshot updates at 9:30 AM
         if now.hour == 9 and now.minute == 30:
             today = now.date()
-            if last_run != today:
+            if last_snapshot_run != today:
                 try:
                     # Step 1: Run yesterday snapshot (before daily overwrites it)
                     def run_yesterday():
@@ -1637,7 +2079,7 @@ async def scheduler_loop():
                 except Exception as e:
                     await send_fetch_message(f"Snapshot update error: {str(e)}")
                 
-                last_run = today
+                last_snapshot_run = today
         
         await asyncio.sleep(20)
 
@@ -1811,6 +2253,229 @@ class StatsTabView(discord.ui.View):
         self.current_tab = "monthly"
         self.update_buttons()
         embed, file = self.generate_composite_image(self.current_tab)
+        if file:
+            await interaction.response.edit_message(view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+
+# Extended stats view (Template.xlsx layout)
+class StatsFullView(discord.ui.View):
+    def __init__(self, sheet, ign: str, level_value: int, prestige_icon: str):
+        super().__init__()
+        self.sheet = sheet
+        self.ign = ign
+        self.level_value = level_value
+        self.prestige_icon = prestige_icon
+        self.current_tab = "all-time"
+        self._load_color()
+        self.stat_rows = self._find_stat_rows()
+        self.column_map = {
+            "all-time": "B",
+            "session": "C",
+            "daily": "E",
+            "yesterday": "G",
+            "monthly": "I",
+        }
+        self.update_buttons()
+
+    def _load_color(self):
+        """Load or reload the color and guild info for this username from user_colors.json"""
+        self.ign_color = None
+        self.guild_tag = None
+        self.guild_color = None
+        try:
+            if os.path.exists(USER_COLORS_FILE):
+                with open(USER_COLORS_FILE, 'r') as f:
+                    color_data = json.load(f)
+                    user_entry = color_data.get(self.ign.lower())
+                    if isinstance(user_entry, str):
+                        self.ign_color = user_entry
+                    elif isinstance(user_entry, dict):
+                        self.ign_color = user_entry.get('color')
+                        self.guild_tag = user_entry.get('guild_tag')
+                        self.guild_color = user_entry.get('guild_color')
+                    print(f"[DEBUG] Loaded color for {self.ign}: {self.ign_color}, guild: [{self.guild_tag}] ({self.guild_color})")
+        except Exception as e:
+            print(f"[WARNING] Failed to load color for {self.ign}: {e}")
+
+    def _find_stat_rows(self):
+        rows = {}
+        for i in range(1, 200):  # scan enough rows to catch every stat
+            stat_name = self.sheet[f'A{i}'].value
+            if stat_name:
+                rows[str(stat_name).lower()] = i
+        return rows
+
+    def _get_value(self, stat_key: str, tab_name: str) -> float:
+        row = self.stat_rows.get(stat_key.lower())
+        if not row:
+            return 0
+        col_letter = self.column_map[tab_name]
+        return _to_number(self.sheet[f"{col_letter}{row}"].value)
+
+    def _collect_stats(self, tab_name: str) -> dict:
+        def safe_div(n, d):
+            return n / d if d else 0
+        def fmt_int(v):
+            return f"{int(round(v)):,}"
+        def fmt_ratio(v):
+            return f"{v:.2f}"
+
+        # Base values
+        experience = self._get_value('experience', tab_name)
+        playtime_seconds = self._get_value('playtime', tab_name)
+        games = self._get_value('games_played', tab_name)
+        wins = self._get_value('wins', tab_name)
+        losses = self._get_value('losses', tab_name)
+        kills = self._get_value('kills', tab_name)
+        deaths = self._get_value('deaths', tab_name)
+        coins = self._get_value('coins', tab_name)
+        layers = self._get_value('available_layers', tab_name)
+        damage = self._get_value('damage_dealt', tab_name)
+        kills_void = self._get_value('kills_void', tab_name)
+        deaths_void = self._get_value('deaths_void', tab_name)
+        magic_wools = self._get_value('magic_wool_hit', tab_name)
+        kills_explosive = self._get_value('kills_explosive', tab_name)
+        deaths_explosive = self._get_value('deaths_explosive', tab_name)
+        sheep_thrown = self._get_value('sheep_thrown', tab_name)
+        kills_bow = self._get_value('kills_bow', tab_name)
+        deaths_bow = self._get_value('deaths_bow', tab_name)
+        kills_melee = self._get_value('kills_melee', tab_name)
+        deaths_melee = self._get_value('deaths_melee', tab_name)
+
+        # Derived values
+        draws = games - wins - losses
+        playtime_hours = playtime_seconds / 3600 if playtime_seconds else 0
+        exp_per_hour = safe_div(experience, playtime_hours)
+        exp_per_game = safe_div(experience, games)
+        kdr = safe_div(kills, deaths) if deaths else kills
+        wlr = safe_div(wins, losses) if losses else wins
+        kills_per_game = safe_div(kills, games)
+        kills_per_win = safe_div(kills, wins)
+        damage_per_game = safe_div(damage, games)
+        void_kdr = safe_div(kills_void, deaths_void) if deaths_void else kills_void
+        wools_per_game = safe_div(magic_wools, games)
+        explosive_kdr = safe_div(kills_explosive, deaths_explosive) if deaths_explosive else kills_explosive
+        sheeps_per_game = safe_div(sheep_thrown, games)
+        bow_kdr = safe_div(kills_bow, deaths_bow) if deaths_bow else kills_bow
+        melee_kdr = safe_div(kills_melee, deaths_melee) if deaths_melee else kills_melee
+
+        stats = {
+            "username": self.ign,
+            "guild": f"[{self.guild_tag}]" if self.guild_tag else "N/A",
+            "playtime": format_playtime(int(playtime_seconds)) if playtime_seconds else "0s",
+            "level": fmt_int(self._get_value('level', tab_name)),
+            "exp_per_hour": fmt_ratio(exp_per_hour),
+            "exp_per_game": fmt_ratio(exp_per_game),
+            "sheepwars_label": "",
+            "wins": fmt_int(wins),
+            "losses": fmt_int(losses),
+            "wlr": fmt_ratio(wlr),
+            "layers": fmt_int(layers),
+            "coins": fmt_int(coins),
+            "kills": fmt_int(kills),
+            "deaths": fmt_int(deaths),
+            "kdr": fmt_ratio(kdr),
+            "kills_per_game": fmt_ratio(kills_per_game),
+            "kills_per_win": fmt_ratio(kills_per_win),
+            "damage": fmt_int(damage),
+            "damage_per_game": fmt_ratio(damage_per_game),
+            "void_kills": fmt_int(kills_void),
+            "void_deaths": fmt_int(deaths_void),
+            "void_kdr": fmt_ratio(void_kdr),
+            "magic_wools": fmt_int(magic_wools),
+            "wools_per_game": fmt_ratio(wools_per_game),
+            "explosive_kills": fmt_int(kills_explosive),
+            "explosive_deaths": fmt_int(deaths_explosive),
+            "explosive_kdr": fmt_ratio(explosive_kdr),
+            "sheeps_thrown": fmt_int(sheep_thrown),
+            "sheeps_per_game": fmt_ratio(sheeps_per_game),
+            "bow_kills": fmt_int(kills_bow),
+            "bow_deaths": fmt_int(deaths_bow),
+            "bow_kdr": fmt_ratio(bow_kdr),
+            "games_played": fmt_int(games),
+            "draws": fmt_int(draws),
+            "melee_kills": fmt_int(kills_melee),
+            "melee_deaths": fmt_int(deaths_melee),
+            "melee_kdr": fmt_ratio(melee_kdr),
+        }
+
+        ordered_fields = [
+            ("Wins", stats["wins"]), ("Losses", stats["losses"]), ("WLR", stats["wlr"]), ("Layers", stats["layers"]), ("Coins", stats["coins"]),
+            ("Kills", stats["kills"]), ("Deaths", stats["deaths"]), ("KDR", stats["kdr"]), ("Kill/Game", stats["kills_per_game"]), ("Kill/Win", stats["kills_per_win"]),
+            ("Damage dealt", stats["damage"]), ("Damage/Game", stats["damage_per_game"]), ("Void kills", stats["void_kills"]), ("Void deaths", stats["void_deaths"]), ("Void KDR", stats["void_kdr"]),
+            ("Magic wools", stats["magic_wools"]), ("Wools/Game", stats["wools_per_game"]), ("Explosive kills", stats["explosive_kills"]), ("Explosive deaths", stats["explosive_deaths"]), ("Explosive KDR", stats["explosive_kdr"]),
+            ("Sheeps thrown", stats["sheeps_thrown"]), ("Sheeps thrown/Game", stats["sheeps_per_game"]), ("Bow kills", stats["bow_kills"]), ("Bow deaths", stats["bow_deaths"]), ("Bow KDR", stats["bow_kdr"]),
+            ("Games Played", stats["games_played"]), ("Draws", stats["draws"]), ("Meelee kills", stats["melee_kills"]), ("Meelee Deaths", stats["melee_deaths"]), ("Meelee KDR", stats["melee_kdr"]),
+        ]
+        stats["ordered_fields"] = ordered_fields
+        return stats
+
+    def update_buttons(self):
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.style = discord.ButtonStyle.primary if child.custom_id == self.current_tab else discord.ButtonStyle.secondary
+
+    def generate_full_image(self, tab_name: str):
+        stats = self._collect_stats(tab_name)
+        if Image is not None:
+            try:
+                img_io = create_full_stats_image(self.ign, tab_name, self.level_value, self.prestige_icon, stats, self.ign_color, self.guild_tag, self.guild_color)
+                filename = f"{self.ign}_{tab_name}_stats_full.png"
+                return None, discord.File(img_io, filename=filename)
+            except Exception as e:
+                print(f"[WARNING] Full stats image generation failed: {e}")
+
+        embed = discord.Embed(title=f"{self.ign} - {tab_name.title()} stats")
+        for label, value in stats.get("ordered_fields", [])[:25]:
+            embed.add_field(name=label, value=f"```{value}```", inline=True)
+        return embed, None
+
+    @discord.ui.button(label="All-time", custom_id="all-time", style=discord.ButtonStyle.primary)
+    async def full_all_time_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_tab = "all-time"
+        self.update_buttons()
+        embed, file = self.generate_full_image(self.current_tab)
+        if file:
+            await interaction.response.edit_message(view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Session", custom_id="session", style=discord.ButtonStyle.secondary)
+    async def full_session_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_tab = "session"
+        self.update_buttons()
+        embed, file = self.generate_full_image(self.current_tab)
+        if file:
+            await interaction.response.edit_message(view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Daily", custom_id="daily", style=discord.ButtonStyle.secondary)
+    async def full_daily_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_tab = "daily"
+        self.update_buttons()
+        embed, file = self.generate_full_image(self.current_tab)
+        if file:
+            await interaction.response.edit_message(view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Yesterday", custom_id="yesterday", style=discord.ButtonStyle.secondary)
+    async def full_yesterday_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_tab = "yesterday"
+        self.update_buttons()
+        embed, file = self.generate_full_image(self.current_tab)
+        if file:
+            await interaction.response.edit_message(view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Monthly", custom_id="monthly", style=discord.ButtonStyle.secondary)
+    async def full_monthly_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_tab = "monthly"
+        self.update_buttons()
+        embed, file = self.generate_full_image(self.current_tab)
         if file:
             await interaction.response.edit_message(view=self, attachments=[file])
         else:
@@ -2152,6 +2817,11 @@ class LeaderboardView(discord.ui.View):
 
 # Create bot with command tree for slash commands
 intents = discord.Intents.default()
+# Enabled intents: members and presences required for member/presence features;
+# message_content allows reading message content if needed (user enabled in Dev Portal).
+intents.members = True
+intents.presences = True
+intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Approval system for claim command
@@ -2203,6 +2873,7 @@ async def on_ready():
     if not getattr(bot, "background_tasks_started", False):
         bot.loop.create_task(scheduler_loop())
         bot.loop.create_task(staggered_stats_refresher(interval_minutes=10))
+        bot.loop.create_task(presence_updater_loop(interval_seconds=5))
         bot.background_tasks_started = True
         print(f"[OK] Background tasks started - Instance ID: {bot_instance_id}")
 
@@ -2226,7 +2897,7 @@ async def track(interaction: discord.Interaction, ign: str):
         
         # Create sheet using api_get.py
         # Initialize session, daily, and monthly snapshots (yesterday will be populated from daily rotation)
-        result = run_script("api_get.py", ["-ign", ign, "-session", "-daily", "-monthly"])
+        result = run_script("api_get.py", ["-ign", ign, "-session", "-yesterday", "-daily", "-monthly"])
 
         if result.returncode == 0:
             print(f"[OK] api_get.py succeeded for {ign}")
@@ -2241,6 +2912,7 @@ async def track(interaction: discord.Interaction, ign: str):
             actual_ign = ign  # Default to input if not found
             wb = None
             try:
+                # FAILSAFE: Load workbook with guaranteed cleanup
                 wb = load_workbook(str(excel_file))
                 sheet_exists = False
                 key = ign.casefold()
@@ -2257,11 +2929,12 @@ async def track(interaction: discord.Interaction, ign: str):
                 await interaction.followup.send(f"[ERROR] Could not verify sheet creation: {str(e)}")
                 return
             finally:
+                # FAILSAFE: Always close workbook even if an error occurs
                 if wb is not None:
                     try:
                         wb.close()
-                    except Exception:
-                        pass
+                    except Exception as close_err:
+                        print(f"[WARNING] Error closing workbook: {close_err}")
             
             # Add to tracked users list using the properly-cased username
             added = add_tracked_user(actual_ign)
@@ -2399,6 +3072,7 @@ async def untrack(interaction: discord.Interaction, ign: str):
         if excel_file.exists():
             wb = None
             try:
+                # FAILSAFE: Load workbook with guaranteed cleanup
                 wb = load_workbook(str(excel_file))
                 key = ign.casefold()
                 for sheet_name in wb.sheetnames:
@@ -2408,11 +3082,12 @@ async def untrack(interaction: discord.Interaction, ign: str):
             except Exception:
                 pass
             finally:
+                # FAILSAFE: Always close workbook even if an error occurs
                 if wb is not None:
                     try:
                         wb.close()
-                    except Exception:
-                        pass
+                    except Exception as close_err:
+                        print(f"[WARNING] Error closing workbook: {close_err}")
         
         # Remove from all locations
         removed_tracked = remove_tracked_user(actual_ign)
@@ -2704,8 +3379,49 @@ async def instructions(interaction: discord.Interaction):
         await interaction.followup.send(f"[ERROR] {str(e)}")
 
 
+@bot.tree.command(name="whatamirunningon", description="Creator-only: show public IP and bot file path")
+async def whatamirunningon(interaction: discord.Interaction):
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            return
+
+    # Only allow the creator (by ID) to run this
+    try:
+        allowed = False
+        if CREATOR_ID is not None:
+            allowed = str(interaction.user.id) == str(CREATOR_ID)
+        else:
+            allowed = interaction.user.name.casefold() == CREATOR_NAME.casefold()
+    except Exception:
+        allowed = False
+
+    if not allowed:
+        await interaction.followup.send("[ERROR] You are not authorized to run this command.", ephemeral=True)
+        return
+
+    # Try to get public IP, fall back to local hostname IP
+    ip = None
+    try:
+        import urllib.request, json, ssl
+        ctx = ssl.create_default_context()
+        with urllib.request.urlopen("https://api.ipify.org?format=json", timeout=5, context=ctx) as resp:
+            data = json.load(resp)
+            ip = data.get("ip")
+    except Exception:
+        try:
+            import socket
+            ip = socket.gethostbyname(socket.gethostname())
+        except Exception:
+            ip = "unknown"
+
+    path = str(BOT_DIR / "discord_bot.py")
+    await interaction.followup.send(f"IP: {ip}\nPath: {path}", ephemeral=True)
+
+
 @bot.tree.command(name="refresh", description="Manually run batch snapshot update for all tracked users")
-@discord.app_commands.describe(mode="One of: session, daily, yesterday, monthly, all, or all+session")
+@discord.app_commands.describe(mode="One of: session, daily, yesterday, monthly, all, or all+session", ign="Optional: Minecraft IGN to refresh")
 @discord.app_commands.choices(mode=[
     discord.app_commands.Choice(name="session", value="session"),
     discord.app_commands.Choice(name="daily", value="daily"),
@@ -2714,24 +3430,59 @@ async def instructions(interaction: discord.Interaction):
     discord.app_commands.Choice(name="all (daily + yesterday + monthly)", value="all"),
     discord.app_commands.Choice(name="all+session (session + daily + yesterday + monthly)", value="all-session"),
 ])
-async def refresh(interaction: discord.Interaction, mode: discord.app_commands.Choice[str]):
+async def refresh(interaction: discord.Interaction, mode: discord.app_commands.Choice[str], ign: str = None):
     if not interaction.response.is_done():
         try:
             await interaction.response.defer(ephemeral=True)
         except (discord.errors.NotFound, discord.errors.HTTPException):
             return
     try:
-        # Run batch_update.py with selected schedule (use extended timeout)
-        def run_batch():
-            return run_script_batch("batch_update.py", ["-schedule", mode.value])
-        
-        result = await asyncio.to_thread(run_batch)
-        
-        if result.returncode == 0:
-            msg = f"Batch snapshot update completed for schedule: {mode.name}"
+        # If an IGN was supplied, run per-user api_get.py with appropriate flags
+        if ign:
+            # Only allow creator or the Discord user who claimed the IGN
+            allowed = False
+            try:
+                if CREATOR_ID is not None and str(interaction.user.id) == str(CREATOR_ID):
+                    allowed = True
+            except Exception:
+                pass
+            if not allowed and not is_user_authorized(interaction.user.id, ign):
+                await interaction.followup.send(f"[ERROR] You are not authorized to refresh {ign}.", ephemeral=True)
+                return
+
+            # Map mode to api_get flags
+            mode_map = {
+                'session': ['-session'],
+                'daily': ['-daily'],
+                'yesterday': ['-yesterday'],
+                'monthly': ['-monthly'],
+                'all': ['-daily', '-yesterday', '-monthly'],
+                'all-session': ['-session', '-daily', '-yesterday', '-monthly'],
+            }
+            flags = mode_map.get(mode.value, [])
+
+            args = ['-ign', ign, *flags]
+
+            # Use batch runner for potentially longer single-user operations
+            result = await asyncio.to_thread(run_script_batch, "api_get.py", args)
+
+            if result.returncode == 0:
+                msg = f"Refresh completed for {ign} (schedule: {mode.name})"
+            else:
+                error_msg = result.stderr or result.stdout or "Unknown error"
+                msg = f"Refresh failed for {ign}: {error_msg[:300]}"
         else:
-            error_msg = result.stderr or result.stdout or "Unknown error"
-            msg = f"Batch update failed: {error_msg[:300]}"
+            # Run batch_update.py with selected schedule (use extended timeout)
+            def run_batch():
+                return run_script_batch("batch_update.py", ["-schedule", mode.value])
+
+            result = await asyncio.to_thread(run_batch)
+
+            if result.returncode == 0:
+                msg = f"Batch snapshot update completed for schedule: {mode.name}"
+            else:
+                error_msg = result.stderr or result.stdout or "Unknown error"
+                msg = f"Batch update failed: {error_msg[:300]}"
         
         # Try to DM the invoking user directly
         try:
@@ -2744,6 +3495,115 @@ async def refresh(interaction: discord.Interaction, mode: discord.app_commands.C
         await interaction.followup.send(f"[ERROR] Batch update timed out after 5 minutes. Try a smaller schedule (e.g., just 'daily' or 'session').", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"[ERROR] {str(e)}", ephemeral=True)
+
+
+@bot.tree.command(name="stats", description="Get full player stats (Template.xlsx layout) with deltas")
+@discord.app_commands.describe(ign="Minecraft IGN")
+async def stats(interaction: discord.Interaction, ign: str):
+    print(f"[DEBUG] /stats triggered for IGN: {ign} by user: {interaction.user.name} in guild: {interaction.guild.name if interaction.guild else 'DM'}")
+    
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except (discord.errors.NotFound, discord.errors.HTTPException) as e:
+            print(f"[DEBUG] Defer failed for {ign} in /stats: {e}")
+            return
+
+    try:
+        # Fetch fresh stats
+        print(f"[DEBUG] Running api_get.py for IGN: {ign} (/stats)")
+        result = run_script("api_get.py", ["-ign", ign])
+        print(f"[DEBUG] api_get.py returncode (/stats): {result.returncode}")
+        print(f"[DEBUG] api_get.py stdout (/stats): {result.stdout if result.stdout else 'None'}")
+        print(f"[DEBUG] api_get.py stderr (/stats): {result.stderr if result.stderr else 'None'}")
+
+        if result.returncode != 0:
+            if result.stderr and "429" in result.stderr:
+                print(f"[DEBUG] Rate limited for {ign} (/stats), attempting to use existing data")
+            else:
+                error_msg = result.stderr or result.stdout or "Unknown error"
+                await interaction.followup.send(f"[ERROR] Failed to fetch stats:\n```{error_msg[:500]}```")
+                return
+
+        EXCEL_FILE = BOT_DIR / "stats.xlsx"
+        if not EXCEL_FILE.exists():
+            await interaction.followup.send("[ERROR] Excel file not found")
+            return
+
+        wb = None
+        try:
+            wb = load_workbook(EXCEL_FILE)
+
+            key = ign.casefold()
+            found_sheet = None
+            actual_ign = ign
+            for sheet_name in wb.sheetnames:
+                if sheet_name.casefold() == key:
+                    found_sheet = wb[sheet_name]
+                    actual_ign = sheet_name
+                    break
+
+            if found_sheet is None:
+                await interaction.followup.send(f"[ERROR] Player sheet '{ign}' not found")
+                return
+
+            # Level and prestige icon
+            try:
+                level_row = None
+                exp_row = None
+                level_value = 0
+                for i in range(1, 100):
+                    name = found_sheet[f'A{i}'].value
+                    if not name:
+                        continue
+                    key_name = str(name).lower()
+                    if key_name == 'level' and level_row is None:
+                        level_row = i
+                    elif key_name == 'experience' and exp_row is None:
+                        exp_row = i
+                if level_row is not None:
+                    level_value = int(found_sheet[f'B{level_row}'].value or 0)
+                elif exp_row is not None:
+                    exp = found_sheet[f'B{exp_row}'].value or 0
+                    level_value = int((exp or 0) / 5000)
+            except Exception:
+                level_value = 0
+            prestige_icon = get_prestige_icon(level_value)
+
+            tracked_users = load_tracked_users()
+            is_tracked = any(u.casefold() == actual_ign.casefold() for u in tracked_users)
+            print(f"[STATS] User '{actual_ign}' is_tracked={is_tracked}")
+
+            view = StatsFullView(found_sheet, actual_ign, level_value, prestige_icon)
+            embed, file = view.generate_full_image("all-time")
+
+            if file:
+                if is_tracked:
+                    await interaction.followup.send(view=view, file=file)
+                else:
+                    message = f"{actual_ign} is not being tracked. Use `/track ign:{actual_ign}` first to see delta-based stats."
+                    await interaction.followup.send(content=message, file=file)
+                    bot.loop.create_task(cleanup_untracked_user_delayed(actual_ign, delay_seconds=60))
+                    return
+            else:
+                if is_tracked:
+                    await interaction.followup.send(embed=embed, view=view)
+                else:
+                    message = f"{actual_ign} is not being tracked. Use `/track ign:{actual_ign}` first to see delta-based stats."
+                    await interaction.followup.send(content=message, embed=embed)
+                    bot.loop.create_task(cleanup_untracked_user_delayed(actual_ign, delay_seconds=60))
+                    return
+        finally:
+            if wb is not None:
+                try:
+                    wb.close()
+                except Exception:
+                    pass
+
+    except subprocess.TimeoutExpired:
+        await interaction.followup.send("[ERROR] Command timed out (30s limit)")
+    except Exception as e:
+        await interaction.followup.send(f"[ERROR] {str(e)}")
 
 @bot.tree.command(name="sheepwars", description="Get player stats with deltas")
 @discord.app_commands.describe(ign="Minecraft IGN")
@@ -2798,6 +3658,7 @@ async def sheepwars(interaction: discord.Interaction, ign: str):
         
         wb = None
         try:
+            # FAILSAFE: Load workbook with guaranteed cleanup
             wb = load_workbook(EXCEL_FILE)
             
             # Find sheet case-insensitively
@@ -2917,6 +3778,7 @@ async def leaderboard(interaction: discord.Interaction, metric: discord.app_comm
         if not os.path.exists(EXCEL_FILE):
             await interaction.followup.send("[ERROR] Excel file not found")
             return
+        # FAILSAFE: Load workbook with guaranteed cleanup
         wb = load_workbook(EXCEL_FILE)
         view = LeaderboardView(metric.value, wb)
         embed, file = view.generate_leaderboard_image("lifetime")
@@ -2927,11 +3789,12 @@ async def leaderboard(interaction: discord.Interaction, metric: discord.app_comm
     except Exception as e:
         await interaction.followup.send(f"[ERROR] {str(e)}")
     finally:
+        # FAILSAFE: Always close workbook even if an error occurs
         if wb is not None:
             try:
                 wb.close()
-            except Exception:
-                pass
+            except Exception as close_err:
+                print(f"[WARNING] Error closing workbook: {close_err}")
 
 
 @bot.tree.command(name="kill-leaderboard", description="View kills leaderboard by type")
@@ -2955,18 +3818,23 @@ async def kill_leaderboard(interaction: discord.Interaction, metric: discord.app
         if not os.path.exists(EXCEL_FILE):
             await interaction.followup.send("[ERROR] Excel file not found")
             return
+        # FAILSAFE: Load workbook with guaranteed cleanup
         wb = load_workbook(EXCEL_FILE)
         view = LeaderboardView(metric.value, wb)
-        embed = view.get_leaderboard_embed("lifetime")
-        await interaction.followup.send(embed=embed, view=view)
+        embed, file = view.generate_leaderboard_image("lifetime")
+        if file:
+            await interaction.followup.send(file=file, view=view)
+        else:
+            await interaction.followup.send(embed=embed, view=view)
     except Exception as e:
         await interaction.followup.send(f"[ERROR] {str(e)}")
     finally:
+        # FAILSAFE: Always close workbook even if an error occurs
         if wb is not None:
             try:
                 wb.close()
-            except Exception:
-                pass
+            except Exception as close_err:
+                print(f"[WARNING] Error closing workbook: {close_err}")
 
 
 @bot.tree.command(name="death-leaderboard", description="View deaths leaderboard by type")
@@ -2990,18 +3858,23 @@ async def death_leaderboard(interaction: discord.Interaction, metric: discord.ap
         if not os.path.exists(EXCEL_FILE):
             await interaction.followup.send("[ERROR] Excel file not found")
             return
+        # FAILSAFE: Load workbook with guaranteed cleanup
         wb = load_workbook(EXCEL_FILE)
         view = LeaderboardView(metric.value, wb)
-        embed = view.get_leaderboard_embed("lifetime")
-        await interaction.followup.send(embed=embed, view=view)
+        embed, file = view.generate_leaderboard_image("lifetime")
+        if file:
+            await interaction.followup.send(file=file, view=view)
+        else:
+            await interaction.followup.send(embed=embed, view=view)
     except Exception as e:
         await interaction.followup.send(f"[ERROR] {str(e)}")
     finally:
+        # FAILSAFE: Always close workbook even if an error occurs
         if wb is not None:
             try:
                 wb.close()
-            except Exception:
-                pass
+            except Exception as close_err:
+                print(f"[WARNING] Error closing workbook: {close_err}")
 
 
 @bot.tree.command(name="prestiges", description="List all prestige prefixes with their colors")

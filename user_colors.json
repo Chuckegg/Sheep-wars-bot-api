@@ -1,182 +1,14 @@
 {
-  "meowiis": {
-    "color": "#FFAA00",
-    "rank": "SUPERSTAR",
-    "guild_tag": "MERRY",
-    "guild_color": "GOLD"
-  },
-  "dejectin": {
-    "color": "#55FFFF",
-    "rank": "MVP_PLUS",
-    "guild_tag": "FREAKY",
-    "guild_color": "DARK_AQUA"
-  },
-  "one4kat": {
-    "color": "#FFD3F5",
-    "rank": "SUPERSTAR",
-    "guild_tag": "PUN",
-    "guild_color": "YELLOW"
-  },
-  "imeowinvc": {
-    "color": "#FF5555",
-    "rank": "VIP",
-    "guild_tag": "QUEBEC",
-    "guild_color": "DARK_GREEN"
-  },
-  "pogdude69": {
-    "color": "#55FFFF",
-    "rank": "MVP",
-    "guild_tag": "QUEBEC",
-    "guild_color": "DARK_GREEN"
-  },
-  "chuckegg": {
-    "color": "#55FFFF",
-    "rank": "MVP_PLUS",
-    "guild_tag": "QUEBEC",
-    "guild_color": "DARK_GREEN"
-  },
   "hamster318": {
     "color": "#FFAA00",
     "rank": "SUPERSTAR",
-    "guild_tag": "MERRY",
+    "guild_tag": "SHEEP",
     "guild_color": "GOLD"
-  },
-  "lxna_": {
-    "color": "#FFAA00",
-    "rank": "SUPERSTAR",
-    "guild_tag": "QUEBEC",
-    "guild_color": "DARK_GREEN"
-  },
-  "qrsn": {
-    "color": "#FFAA00",
-    "rank": "SUPERSTAR",
-    "guild_tag": "\u273fFISHE\u2764",
-    "guild_color": "DARK_AQUA"
-  },
-  "aurxraaa": {
-    "color": "#FFAA00",
-    "rank": "SUPERSTAR",
-    "guild_tag": "SCHOKO",
-    "guild_color": "GRAY"
-  },
-  "tntcoins": {
-    "color": "#55FFFF",
-    "rank": "MVP_PLUS",
-    "guild_tag": "MERRY",
-    "guild_color": "GOLD"
-  },
-  "isabelle_u": {
-    "color": "#55FF55",
-    "rank": "VIP",
-    "guild_tag": "GOMLVL",
-    "guild_color": "DARK_GREEN"
-  },
-  "luckybooger": {
-    "color": "#55FFFF",
-    "rank": "MVP_PLUS",
-    "guild_tag": "SEHEN",
-    "guild_color": "DARK_GREEN"
-  },
-  "niccotucks": {
-    "color": "#FFAA00",
-    "rank": "SUPERSTAR",
-    "guild_tag": "SHEAF",
-    "guild_color": "DARK_GREEN"
   },
   "emiskittles": {
     "color": "#FFAA00",
     "rank": "SUPERSTAR",
     "guild_tag": "GOON",
-    "guild_color": null
-  },
-  "plataipus": {
-    "color": "#55FF55",
-    "rank": "VIP",
-    "guild_tag": "CINNER",
-    "guild_color": "YELLOW"
-  },
-  "__feared": {
-    "color": "#FFFFFF",
-    "rank": null,
-    "guild_tag": "MERRY",
-    "guild_color": "GOLD"
-  },
-  "brokenarrow101": {
-    "color": "#55FFFF",
-    "rank": "MVP_PLUS",
-    "guild_tag": "SIGH",
-    "guild_color": "DARK_GREEN"
-  },
-  "isc0re": {
-    "color": "#FFAA00",
-    "rank": "SUPERSTAR",
-    "guild_tag": "MACCA",
-    "guild_color": "YELLOW"
-  },
-  "rickrollium": {
-    "color": "#55FFFF",
-    "rank": "MVP_PLUS",
-    "guild_tag": "MERRY",
-    "guild_color": "GOLD"
-  },
-  "mahelvilson": {
-    "color": "#55FF55",
-    "rank": "VIP",
-    "guild_tag": "PUB",
-    "guild_color": "DARK_GREEN"
-  },
-  "leahwii": {
-    "color": "#55FFFF",
-    "rank": "MVP_PLUS",
-    "guild_tag": "7",
-    "guild_color": "YELLOW"
-  },
-  "skyemac11": {
-    "color": "#FFAA00",
-    "rank": "SUPERSTAR",
-    "guild_tag": null,
-    "guild_color": null
-  },
-  "xplod3d": {
-    "color": "#FFAA00",
-    "rank": "SUPERSTAR",
-    "guild_tag": "SEXY\u272a",
-    "guild_color": "YELLOW"
-  },
-  "acentrion": {
-    "color": "#FFAA00",
-    "rank": "SUPERSTAR",
-    "guild_tag": "VISION",
-    "guild_color": "GOLD"
-  },
-  "leoneyl": {
-    "color": "#55FFFF",
-    "rank": "MVP_PLUS",
-    "guild_tag": "MERRY",
-    "guild_color": "GOLD"
-  },
-  "skepticab": {
-    "color": "#FFAA00",
-    "rank": "SUPERSTAR",
-    "guild_tag": "MERRY",
-    "guild_color": "GOLD"
-  },
-  "lvsuv": {
-    "color": "#55FFFF",
-    "rank": "MVP_PLUS",
-    "guild_tag": "QUEBEC",
-    "guild_color": "DARK_GREEN"
-  },
-  "mogicul": {
-    "color": "#FFAA00",
-    "rank": "SUPERSTAR",
-    "guild_tag": "CONK",
-    "guild_color": "YELLOW"
-  },
-  "yannlc": {
-    "color": "#55FFFF",
-    "rank": "MVP_PLUS",
-    "guild_tag": null,
     "guild_color": null
   },
   "zkenly": {
@@ -185,22 +17,220 @@
     "guild_tag": "GOAT",
     "guild_color": "DARK_AQUA"
   },
+  "brokenarrow101": {
+    "color": "#FFAA00",
+    "rank": "SUPERSTAR",
+    "guild_tag": "SIGH",
+    "guild_color": "DARK_GREEN"
+  },
+  "hiiiii": {
+    "color": "#FFAA00",
+    "rank": "SUPERSTAR",
+    "guild_tag": "\u2727DOMIN\u2727",
+    "guild_color": "DARK_AQUA"
+  },
+  "lvsuv": {
+    "color": "#55FFFF",
+    "rank": "MVP_PLUS",
+    "guild_tag": "QUEBEC",
+    "guild_color": "DARK_GREEN"
+  },
+  "yannlc": {
+    "color": "#55FFFF",
+    "rank": "MVP_PLUS",
+    "guild_tag": null,
+    "guild_color": null
+  },
+  "skepticab": {
+    "color": "#FFAA00",
+    "rank": "SUPERSTAR",
+    "guild_tag": "SHEEP",
+    "guild_color": "GOLD"
+  },
+  "mogicul": {
+    "color": "#FFAA00",
+    "rank": "SUPERSTAR",
+    "guild_tag": "CONK",
+    "guild_color": "YELLOW"
+  },
+  "chuckegg": {
+    "color": "#55FFFF",
+    "rank": "MVP_PLUS",
+    "guild_tag": "QUEBEC",
+    "guild_color": "DARK_GREEN"
+  },
   "wetconkreet": {
     "color": "#00AA00",
     "rank": "VIP_PLUS",
     "guild_tag": "CONK",
     "guild_color": "YELLOW"
   },
+  "oepchen12": {
+    "color": "#FFFFFF",
+    "rank": null,
+    "guild_tag": "SCHOKO",
+    "guild_color": "GRAY"
+  },
+  "aurxraaa": {
+    "color": "#FFAA00",
+    "rank": "SUPERSTAR",
+    "guild_tag": "SCHOKO",
+    "guild_color": "GRAY"
+  },
+  "luckybooger": {
+    "color": "#55FFFF",
+    "rank": "MVP_PLUS",
+    "guild_tag": "SEHEN",
+    "guild_color": "DARK_GREEN"
+  },
+  "i_hamster": {
+    "color": "#FFAA00",
+    "rank": "SUPERSTAR",
+    "guild_tag": "PIXING",
+    "guild_color": "GRAY"
+  },
+  "meowiis": {
+    "color": "#FFAA00",
+    "rank": "SUPERSTAR",
+    "guild_tag": "SHEEP",
+    "guild_color": "GOLD"
+  },
+  "plataipus": {
+    "color": "#55FF55",
+    "rank": "VIP",
+    "guild_tag": "CINNER",
+    "guild_color": "YELLOW"
+  },
+  "mahelvilson": {
+    "color": "#55FF55",
+    "rank": "VIP",
+    "guild_tag": "PUB",
+    "guild_color": "DARK_GREEN"
+  },
+  "acentrion": {
+    "color": "#FFAA00",
+    "rank": "SUPERSTAR",
+    "guild_tag": "PRIME",
+    "guild_color": "GOLD"
+  },
+  "dejectin": {
+    "color": "#FFAA00",
+    "rank": "SUPERSTAR",
+    "guild_tag": "FREAKY",
+    "guild_color": "DARK_AQUA"
+  },
+  "nydev": {
+    "color": "#FFAA00",
+    "rank": "SUPERSTAR",
+    "guild_tag": "VZ",
+    "guild_color": "DARK_AQUA"
+  },
+  "qrsn": {
+    "color": "#FFAA00",
+    "rank": "SUPERSTAR",
+    "guild_tag": "\u273fFISHE\u2764",
+    "guild_color": "DARK_AQUA"
+  },
+  "skyemac11": {
+    "color": "#FFAA00",
+    "rank": "SUPERSTAR",
+    "guild_tag": null,
+    "guild_color": null
+  },
+  "lxna_": {
+    "color": "#FFAA00",
+    "rank": "SUPERSTAR",
+    "guild_tag": "QUEBEC",
+    "guild_color": "DARK_GREEN"
+  },
+  "raemu": {
+    "color": "#FFAA00",
+    "rank": "SUPERSTAR",
+    "guild_tag": "\u2727LUCID\u2727",
+    "guild_color": "YELLOW"
+  },
+  "one4kat": {
+    "color": "#FFAA00",
+    "rank": "SUPERSTAR",
+    "guild_tag": "PUN",
+    "guild_color": "YELLOW"
+  },
+  "leoneyl": {
+    "color": "#55FFFF",
+    "rank": "MVP_PLUS",
+    "guild_tag": "SHEEP",
+    "guild_color": "GOLD"
+  },
+  "isabelle_u": {
+    "color": "#55FF55",
+    "rank": "VIP",
+    "guild_tag": "GOMLVL",
+    "guild_color": "DARK_GREEN"
+  },
   "kabutokat": {
     "color": "#FFAA00",
     "rank": "SUPERSTAR",
-    "guild_tag": "MERRY",
+    "guild_tag": "SHEEP",
+    "guild_color": "GOLD"
+  },
+  "isc0re": {
+    "color": "#FFAA00",
+    "rank": "SUPERSTAR",
+    "guild_tag": "MACCA",
+    "guild_color": "YELLOW"
+  },
+  "niccotucks": {
+    "color": "#FFAA00",
+    "rank": "SUPERSTAR",
+    "guild_tag": "SHEAF",
+    "guild_color": "DARK_GREEN"
+  },
+  "rickrollium": {
+    "color": "#55FFFF",
+    "rank": "MVP_PLUS",
+    "guild_tag": "SHEEP",
     "guild_color": "GOLD"
   },
   "flakitoo23": {
     "color": "#55FFFF",
     "rank": "MVP_PLUS",
-    "guild_tag": "MERRY",
+    "guild_tag": "SHEEP",
     "guild_color": "GOLD"
+  },
+  "tntcoins": {
+    "color": "#55FFFF",
+    "rank": "MVP_PLUS",
+    "guild_tag": "SHEEP",
+    "guild_color": "GOLD"
+  },
+  "imeowinvc": {
+    "color": "#55FF55",
+    "rank": "VIP",
+    "guild_tag": "QUEBEC",
+    "guild_color": "DARK_GREEN"
+  },
+  "kimmiii20": {
+    "color": "#FFAA00",
+    "rank": "SUPERSTAR",
+    "guild_tag": "FELLAS",
+    "guild_color": "GOLD"
+  },
+  "__feared": {
+    "color": "#FFFFFF",
+    "rank": null,
+    "guild_tag": "SHEEP",
+    "guild_color": "GOLD"
+  },
+  "xplod3d": {
+    "color": "#FFAA00",
+    "rank": "SUPERSTAR",
+    "guild_tag": "SEXY\u272a",
+    "guild_color": "YELLOW"
+  },
+  "pogdvde": {
+    "color": "#FFAA00",
+    "rank": "SUPERSTAR",
+    "guild_tag": "QUEBEC",
+    "guild_color": "DARK_GREEN"
   }
 }

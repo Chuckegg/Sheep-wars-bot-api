@@ -91,6 +91,7 @@ def rotate_daily_to_yesterday():
     
     wb = None
     try:
+        # FAILSAFE: Load workbook with guaranteed cleanup
         wb = load_workbook(EXCEL_FILE)
         users = load_tracked_users()
         updated_count = 0
@@ -138,12 +139,16 @@ def rotate_daily_to_yesterday():
         
     except Exception as e:
         print(f"[ERROR] Exception during rotate_daily_to_yesterday: {e}")
+        return 0
+        
+    finally:
+        # FAILSAFE: Always close workbook even if an error occurs
         if wb is not None:
             try:
                 wb.close()
-            except Exception:
-                pass
-        return 0
+                print("[CLEANUP] Workbook closed")
+            except Exception as close_err:
+                print(f"[WARNING] Error closing workbook: {close_err}")
 
 
 if __name__ == "__main__":
