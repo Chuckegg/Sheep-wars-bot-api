@@ -2,7 +2,7 @@
   "hamster318": {
     "color": "#FFAA00",
     "rank": "SUPERSTAR",
-    "guild_tag": "SHEEP",
+    "guild_tag": "67DADS",
     "guild_color": "GOLD"
   },
   "emiskittles": {
@@ -44,7 +44,7 @@
   "skepticab": {
     "color": "#FFAA00",
     "rank": "SUPERSTAR",
-    "guild_tag": "SHEEP",
+    "guild_tag": "67DADS",
     "guild_color": "GOLD"
   },
   "mogicul": {
@@ -92,7 +92,7 @@
   "meowiis": {
     "color": "#FFAA00",
     "rank": "SUPERSTAR",
-    "guild_tag": "SHEEP",
+    "guild_tag": "67DADS",
     "guild_color": "GOLD"
   },
   "plataipus": {
@@ -158,7 +158,7 @@
   "leoneyl": {
     "color": "#55FFFF",
     "rank": "MVP_PLUS",
-    "guild_tag": "SHEEP",
+    "guild_tag": "67DADS",
     "guild_color": "GOLD"
   },
   "isabelle_u": {
@@ -170,7 +170,7 @@
   "kabutokat": {
     "color": "#FFAA00",
     "rank": "SUPERSTAR",
-    "guild_tag": "SHEEP",
+    "guild_tag": "67DADS",
     "guild_color": "GOLD"
   },
   "isc0re": {
@@ -188,19 +188,19 @@
   "rickrollium": {
     "color": "#55FFFF",
     "rank": "MVP_PLUS",
-    "guild_tag": "SHEEP",
+    "guild_tag": "67DADS",
     "guild_color": "GOLD"
   },
   "flakitoo23": {
     "color": "#55FFFF",
     "rank": "MVP_PLUS",
-    "guild_tag": "SHEEP",
+    "guild_tag": "67DADS",
     "guild_color": "GOLD"
   },
   "tntcoins": {
     "color": "#55FFFF",
     "rank": "MVP_PLUS",
-    "guild_tag": "SHEEP",
+    "guild_tag": "67DADS",
     "guild_color": "GOLD"
   },
   "imeowinvc": {
@@ -218,7 +218,7 @@
   "__feared": {
     "color": "#FFFFFF",
     "rank": null,
-    "guild_tag": "SHEEP",
+    "guild_tag": "67DADS",
     "guild_color": "GOLD"
   },
   "xplod3d": {
@@ -232,5 +232,29 @@
     "rank": "SUPERSTAR",
     "guild_tag": "QUEBEC",
     "guild_color": "DARK_GREEN"
+  },
+  "cjhong": {
+    "color": "#55FFFF",
+    "rank": "MVP_PLUS",
+    "guild_tag": "HOMIES",
+    "guild_color": "DARK_AQUA"
+  },
+  "nymmie": {
+    "color": "#55FFFF",
+    "rank": "MVP_PLUS",
+    "guild_tag": "FREAKY",
+    "guild_color": "DARK_AQUA"
+  },
+  "nickohlas": {
+    "color": "#55FFFF",
+    "rank": "MVP_PLUS",
+    "guild_tag": "FREAKY",
+    "guild_color": "DARK_AQUA"
+  },
+  "timmiejimmie": {
+    "color": "#00AA00",
+    "rank": "VIP_PLUS",
+    "guild_tag": null,
+    "guild_color": null
   }
 }

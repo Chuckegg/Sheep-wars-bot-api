@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import json
 from pathlib import Path
 import io
+import requests
 try:
     from PIL import Image, ImageDraw, ImageFont
 except Exception:
@@ -22,6 +23,7 @@ BOT_DIR = Path(__file__).parent.absolute()
 TRACKED_FILE = os.path.join(os.path.dirname(__file__), "tracked_users.txt")
 USER_LINKS_FILE = os.path.join(os.path.dirname(__file__), "user_links.json")
 USER_COLORS_FILE = os.path.join(os.path.dirname(__file__), "user_colors.json")
+DEFAULT_USERS_FILE = os.path.join(os.path.dirname(__file__), "default_users.json")
 CREATOR_NAME = "chuckegg"
 # Optionally set a numeric Discord user ID for direct DM (recommended for reliability)
 CREATOR_ID = "542467909549555734"
@@ -192,6 +194,25 @@ def sanitize_output(text: str) -> str:
     # Collapse very long whitespace
     text = re.sub(r"\s{3,}", ' ', text)
     return text
+
+
+def validate_and_normalize_ign(ign: str):
+    s = str(ign or '').strip()
+    if not re.fullmatch(r'^[A-Za-z0-9_]{3,16}$', s):
+        return False, None
+    try:
+        r = requests.get(f'https://api.mojang.com/users/profiles/minecraft/{s}', timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            name = data.get('name')
+            if isinstance(name, str) and re.fullmatch(r'^[A-Za-z0-9_]{3,16}$', name):
+                return True, name
+            return True, s
+        if r.status_code in (204, 404):
+            return False, None
+        return True, s
+    except Exception:
+        return True, s
 
 
 def _to_number(val):
@@ -1009,7 +1030,7 @@ def create_full_stats_image(ign: str, tab_name: str, level: int, icon: str, stat
         ],
         [
             ("Games Played", stats.get("games_played", "0")),
-            ("Draws", stats.get("draws", "0")),
+            ("Damage/Sheep", stats.get("damage_per_sheep", "0")),
             ("Meelee kills", stats.get("melee_kills", "0")),
             ("Meelee Deaths", stats.get("melee_deaths", "0")),
             ("Meelee KDR", stats.get("melee_kdr", "0")),
@@ -1082,14 +1103,16 @@ def create_full_stats_image(ign: str, tab_name: str, level: int, icon: str, stat
     return out
 
 
-def create_leaderboard_image(tab_name: str, metric_label: str, leaderboard_data: list) -> io.BytesIO:
+def create_leaderboard_image(tab_name: str, metric_label: str, leaderboard_data: list, page: int = 0, total_pages: int = 1) -> io.BytesIO:
     """Create a leaderboard image similar to the SheepWars format.
-    
+
     Args:
         tab_name: The period/tab name (e.g., "Lifetime", "Session")
         metric_label: The stat being displayed (e.g., "Magic Wool", "Kills")
         leaderboard_data: List of tuples (rank, player_name, level, icon, ign_color, value, is_playtime)
-    
+        page: Zero-based page index for display context
+        total_pages: Total available pages for display context
+
     Returns:
         BytesIO containing the rendered PNG image
     """
@@ -1127,7 +1150,7 @@ def create_leaderboard_image(tab_name: str, metric_label: str, leaderboard_data:
         data_font = ImageFont.load_default()
         prestige_font = ImageFont.load_default()
     
-    # Draw title - just "{tab_name} {metric_label} Leaderboard"
+    # Draw title without page suffix to avoid overly wide text
     title_text = f"{tab_name} {metric_label} Leaderboard"
     
     # Calculate title position
@@ -1254,6 +1277,89 @@ def create_leaderboard_image(tab_name: str, metric_label: str, leaderboard_data:
     img.save(out, format='PNG')
     out.seek(0)
     return out
+
+
+def create_distribution_pie(title: str, slices: list) -> io.BytesIO:
+    """Render a pie chart with a subtle 3D tilt and legend."""
+    if Image is None:
+        raise RuntimeError("Pillow not available")
+
+    total = sum(v for _, v, _ in slices)
+    if total <= 0:
+        total = 1
+
+    width, height = 860, 560
+    padding = 36
+    legend_height = 180
+    pie_top = 70
+    depth = 36  # vertical extrusion to fake 3D
+    usable_height = height - legend_height - padding - pie_top
+    pie_height = max(160, usable_height - depth)
+
+    img = Image.new("RGB", (width, height), (30, 30, 35))
+    draw = ImageDraw.Draw(img)
+
+    try:
+        title_font = _load_font("DejaVuSans-Bold.ttf", 26)
+        legend_font = _load_font("DejaVuSans.ttf", 17)
+    except Exception:
+        title_font = ImageFont.load_default()
+        legend_font = ImageFont.load_default()
+
+    bbox = draw.textbbox((0, 0), title, font=title_font)
+    title_width = bbox[2] - bbox[0]
+    draw.text(((width - title_width) // 2, 20), title, font=title_font, fill=(230, 230, 230))
+
+    top_bbox = (padding, pie_top, width - padding, pie_top + pie_height)
+    outline_dark = (18, 18, 24)
+
+    def _shade(color, factor: float):
+        return tuple(max(0, min(255, int(channel * factor))) for channel in color)
+
+    # Precompute slice angles so we can reuse them for the depth and top faces
+    slice_angles = []
+    start_angle = 90  # start at 90 degrees (middle-right position)
+    for _, value, color in slices:
+        extent = 360 * (value / total)
+        end_angle = start_angle + extent
+        if extent > 0:
+            slice_angles.append((start_angle, end_angle, color))
+        start_angle = end_angle
+
+    # Draw depth layers from back to front, one z-level at a time
+    # This ensures all slices are visible at each depth level
+    for z in range(depth, -1, -1):  # Include z=0 to eliminate gap
+        for start_angle, end_angle, color in slice_angles:
+            # Use the original color for all depth layers to match the top face
+            offset_bbox = (
+                top_bbox[0],
+                top_bbox[1] + z,
+                top_bbox[2],
+                top_bbox[3] + z,
+            )
+            # Use color for both fill and outline to eliminate any gaps between layers
+            draw.pieslice(offset_bbox, start=start_angle, end=end_angle, fill=color, outline=color, width=2)
+
+    # Draw separator lines on the top face only (no fill, just outline)
+    separator_color = (20, 20, 25)  # Dark separator between slices
+    for start_angle, end_angle, color in slice_angles:
+        draw.pieslice(top_bbox, start=start_angle, end=end_angle, fill=None, outline=separator_color, width=1)
+
+    legend_x = padding + 10
+    legend_y = top_bbox[3] + depth + 24
+    box_size = 20
+    line_spacing = 28
+    for idx, (label, value, color) in enumerate(slices):
+        percent = (value / total * 100) if total else 0
+        y = legend_y + idx * line_spacing
+        draw.rectangle([legend_x, y, legend_x + box_size, y + box_size], fill=color, outline=(240, 240, 240))
+        text = f"{label}: {value} ({percent:.1f}%)"
+        draw.text((legend_x + box_size + 10, y - 2), text, font=legend_font, fill=(220, 220, 220))
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
 
 
 def render_prestige_range_image(base: int, end_display: int) -> io.BytesIO:
@@ -1584,6 +1690,13 @@ def is_user_authorized(discord_user_id: int, ign: str) -> bool:
     key = ign.casefold()
     return links.get(key) == str(discord_user_id)
 
+def is_creator_user(discord_user_id: int) -> bool:
+    """Check if the given Discord user ID matches the creator's ID."""
+    try:
+        return CREATOR_ID is not None and str(discord_user_id) == str(CREATOR_ID)
+    except Exception:
+        return False
+
 def remove_tracked_user(ign: str) -> bool:
     """Remove a username from tracked users list"""
     users = load_tracked_users()
@@ -1639,22 +1752,27 @@ def delete_user_sheet(ign: str) -> bool:
         if not excel_file.exists():
             return False
         
-        # FAILSAFE: Load workbook with guaranteed cleanup
-        wb = load_workbook(str(excel_file))
-        key = ign.casefold()
-        sheet_to_delete = None
-        
-        for sheet_name in wb.sheetnames:
-            if sheet_name.casefold() == key:
-                sheet_to_delete = sheet_name
-                break
-        
-        if sheet_to_delete:
-            del wb[sheet_to_delete]
-            save_success = safe_save_workbook(wb, str(excel_file))
-            if not save_success:
-                print(f"[ERROR] Failed to save after deleting sheet for {ign}")
-                return False
+        wb = None
+        try:
+            # FAILSAFE: Load workbook with guaranteed cleanup
+            wb = load_workbook(str(excel_file))
+            key = ign.casefold()
+            sheet_to_delete = None
+            
+            for sheet_name in wb.sheetnames:
+                if sheet_name.casefold() == key:
+                    sheet_to_delete = sheet_name
+                    break
+            
+            if sheet_to_delete:
+                del wb[sheet_to_delete]
+                save_success = safe_save_workbook(wb, str(excel_file))
+                if not save_success:
+                    print(f"[ERROR] Failed to save after deleting sheet for {ign}")
+                    return False
+        finally:
+            if wb is not None:
+                wb.close()
             return True
         
         # Sheet not found
@@ -1671,6 +1789,29 @@ def delete_user_sheet(ign: str) -> bool:
                 wb.close()
             except Exception as close_err:
                 print(f"[WARNING] Error closing workbook: {close_err}")
+
+# ---- Default IGN helpers ----
+def load_default_users() -> dict:
+    if not os.path.exists(DEFAULT_USERS_FILE):
+        return {}
+    try:
+        with open(DEFAULT_USERS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_default_users(defaults: dict):
+    with open(DEFAULT_USERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(defaults, f, indent=2)
+
+def set_default_user(discord_user_id: int, ign: str):
+    defaults = load_default_users()
+    defaults[str(discord_user_id)] = ign
+    save_default_users(defaults)
+
+def get_default_user(discord_user_id: int) -> str | None:
+    defaults = load_default_users()
+    return defaults.get(str(discord_user_id))
 
 async def cleanup_untracked_user_delayed(ign: str, delay_seconds: int = 60):
     """Schedule cleanup of untracked user data after a delay.
@@ -2344,7 +2485,6 @@ class StatsFullView(discord.ui.View):
         deaths_melee = self._get_value('deaths_melee', tab_name)
 
         # Derived values
-        draws = games - wins - losses
         playtime_hours = playtime_seconds / 3600 if playtime_seconds else 0
         exp_per_hour = safe_div(experience, playtime_hours)
         exp_per_game = safe_div(experience, games)
@@ -2353,6 +2493,7 @@ class StatsFullView(discord.ui.View):
         kills_per_game = safe_div(kills, games)
         kills_per_win = safe_div(kills, wins)
         damage_per_game = safe_div(damage, games)
+        damage_per_sheep = safe_div(damage, sheep_thrown)
         void_kdr = safe_div(kills_void, deaths_void) if deaths_void else kills_void
         wools_per_game = safe_div(magic_wools, games)
         explosive_kdr = safe_div(kills_explosive, deaths_explosive) if deaths_explosive else kills_explosive
@@ -2380,6 +2521,7 @@ class StatsFullView(discord.ui.View):
             "kills_per_win": fmt_ratio(kills_per_win),
             "damage": fmt_int(damage),
             "damage_per_game": fmt_ratio(damage_per_game),
+            "damage_per_sheep": fmt_ratio(damage_per_sheep),
             "void_kills": fmt_int(kills_void),
             "void_deaths": fmt_int(deaths_void),
             "void_kdr": fmt_ratio(void_kdr),
@@ -2394,7 +2536,6 @@ class StatsFullView(discord.ui.View):
             "bow_deaths": fmt_int(deaths_bow),
             "bow_kdr": fmt_ratio(bow_kdr),
             "games_played": fmt_int(games),
-            "draws": fmt_int(draws),
             "melee_kills": fmt_int(kills_melee),
             "melee_deaths": fmt_int(deaths_melee),
             "melee_kdr": fmt_ratio(melee_kdr),
@@ -2406,7 +2547,7 @@ class StatsFullView(discord.ui.View):
             ("Damage dealt", stats["damage"]), ("Damage/Game", stats["damage_per_game"]), ("Void kills", stats["void_kills"]), ("Void deaths", stats["void_deaths"]), ("Void KDR", stats["void_kdr"]),
             ("Magic wools", stats["magic_wools"]), ("Wools/Game", stats["wools_per_game"]), ("Explosive kills", stats["explosive_kills"]), ("Explosive deaths", stats["explosive_deaths"]), ("Explosive KDR", stats["explosive_kdr"]),
             ("Sheeps thrown", stats["sheeps_thrown"]), ("Sheeps thrown/Game", stats["sheeps_per_game"]), ("Bow kills", stats["bow_kills"]), ("Bow deaths", stats["bow_deaths"]), ("Bow KDR", stats["bow_kdr"]),
-            ("Games Played", stats["games_played"]), ("Draws", stats["draws"]), ("Meelee kills", stats["melee_kills"]), ("Meelee Deaths", stats["melee_deaths"]), ("Meelee KDR", stats["melee_kdr"]),
+            ("Games Played", stats["games_played"]), ("Damage/Sheep", stats["damage_per_sheep"]), ("Meelee kills", stats["melee_kills"]), ("Meelee Deaths", stats["melee_deaths"]), ("Meelee KDR", stats["melee_kdr"]),
         ]
         stats["ordered_fields"] = ordered_fields
         return stats
@@ -2482,13 +2623,165 @@ class StatsFullView(discord.ui.View):
             await interaction.response.edit_message(embed=embed, view=self)
 
 
-# Leaderboard view for switching between periods
+class DistributionView(discord.ui.View):
+    def __init__(self, sheet, ign: str, mode: str):
+        super().__init__()
+        self.sheet = sheet
+        self.ign = ign
+        self.mode = mode  # 'kill' or 'death'
+        self.current_tab = "all-time"
+        self.stat_rows = self._find_stat_rows()
+        self.column_map = {
+            "all-time": "B",
+            "session": "C",
+            "daily": "E",
+            "yesterday": "G",
+            "monthly": "I",
+        }
+        # Colors for legend slices
+        self.slice_colors = {
+            "void": (90, 155, 255),        # blue
+            "explosive": (255, 119, 84),   # orange-red
+            "bow": (255, 214, 102),        # golden
+            "melee": (126, 217, 126),      # green
+        }
+        self.update_buttons()
+
+    def _find_stat_rows(self):
+        rows = {}
+        for i in range(1, 200):
+            stat_name = self.sheet[f'A{i}'].value
+            if stat_name:
+                rows[str(stat_name).lower()] = i
+        return rows
+
+    def update_buttons(self):
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.style = discord.ButtonStyle.primary if child.custom_id.endswith(self.current_tab) else discord.ButtonStyle.secondary
+
+    def _get_counts(self, tab_name: str):
+        col = self.column_map[tab_name]
+        if self.mode == "kill":
+            keys = [
+                ("Melee Kills", "kills_melee", "melee"),
+                ("Bow Kills", "kills_bow", "bow"),
+                ("Explosive Kills", "kills_explosive", "explosive"),
+                ("Void Kills", "kills_void", "void"),
+            ]
+        else:
+            keys = [
+                ("Melee Deaths", "deaths_melee", "melee"),
+                ("Bow Deaths", "deaths_bow", "bow"),
+                ("Explosive Deaths", "deaths_explosive", "explosive"),
+                ("Void Deaths", "deaths_void", "void"),
+            ]
+
+        counts = []
+        for label, key, color_key in keys:
+            row = self.stat_rows.get(key)
+            val = _to_number(self.sheet[f"{col}{row}"].value) if row else 0
+            counts.append((label, max(0, float(val)), color_key))
+        return counts
+
+    def generate_distribution(self, tab_name: str):
+        counts = self._get_counts(tab_name)
+        total = sum(v for _, v, _ in counts)
+        metric_label = "Kill" if self.mode == "kill" else "Death"
+
+        if total <= 0:
+            embed = discord.Embed(
+                title=f"{self.ign} - {tab_name.title()} {metric_label} Distribution",
+                description="No data for this period.",
+                color=discord.Color.from_rgb(54, 57, 63),
+            )
+            return embed, None
+
+        slice_payload = []
+        for label, value, color_key in counts:
+            color = self.slice_colors.get(color_key, (180, 180, 180))
+            slice_payload.append((label, value, color))
+
+        if Image is not None:
+            try:
+                title = f"{self.ign} - {tab_name.title()} {metric_label} Distribution"
+                img_io = create_distribution_pie(title, slice_payload)
+                filename = f"{self.ign}_{self.mode}_{tab_name}_distribution.png"
+                return None, discord.File(img_io, filename=filename)
+            except Exception as e:
+                print(f"[WARNING] Distribution image generation failed: {e}")
+
+        # Fallback to embed if Pillow is missing or image failed
+        embed = discord.Embed(
+            title=f"{self.ign} - {tab_name.title()} {metric_label} Distribution",
+            color=discord.Color.from_rgb(54, 57, 63),
+        )
+        lines = []
+        for label, value, _ in counts:
+            percent = (value / total * 100) if total else 0
+            lines.append(f"{label}: {value} ({percent:.1f}%)")
+        embed.description = "\n".join(lines)
+        return embed, None
+
+    @discord.ui.button(label="All-time", custom_id="dist-all-time", style=discord.ButtonStyle.primary)
+    async def dist_all_time_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_tab = "all-time"
+        self.update_buttons()
+        embed, file = self.generate_distribution(self.current_tab)
+        if file:
+            await interaction.response.edit_message(embed=None, view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self, attachments=[])
+
+    @discord.ui.button(label="Session", custom_id="dist-session", style=discord.ButtonStyle.secondary)
+    async def dist_session_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_tab = "session"
+        self.update_buttons()
+        embed, file = self.generate_distribution(self.current_tab)
+        if file:
+            await interaction.response.edit_message(embed=None, view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self, attachments=[])
+
+    @discord.ui.button(label="Daily", custom_id="dist-daily", style=discord.ButtonStyle.secondary)
+    async def dist_daily_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_tab = "daily"
+        self.update_buttons()
+        embed, file = self.generate_distribution(self.current_tab)
+        if file:
+            await interaction.response.edit_message(embed=None, view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self, attachments=[])
+
+    @discord.ui.button(label="Yesterday", custom_id="dist-yesterday", style=discord.ButtonStyle.secondary)
+    async def dist_yesterday_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_tab = "yesterday"
+        self.update_buttons()
+        embed, file = self.generate_distribution(self.current_tab)
+        if file:
+            await interaction.response.edit_message(embed=None, view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self, attachments=[])
+
+    @discord.ui.button(label="Monthly", custom_id="dist-monthly", style=discord.ButtonStyle.secondary)
+    async def dist_monthly_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_tab = "monthly"
+        self.update_buttons()
+        embed, file = self.generate_distribution(self.current_tab)
+        if file:
+            await interaction.response.edit_message(embed=None, view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self, attachments=[])
+
+
 class LeaderboardView(discord.ui.View):
     def __init__(self, metric: str, wb):
         super().__init__()
         self.metric = metric
         self.wb = wb
         self.current_period = "lifetime"
+        self.page = 0
+        self.page_size = 10
         
         # Column mappings for each period
         self.column_map = {
@@ -2538,30 +2831,22 @@ class LeaderboardView(discord.ui.View):
                             self.user_colors[username] = user_entry.get('color')
         except Exception as e:
             print(f"[WARNING] Failed to load user colors: {e}")
-        
-        self.update_buttons()
-    
-    def update_buttons(self):
-        for child in self.children:
-            if isinstance(child, discord.ui.Button):
-                if child.custom_id == self.current_period:
-                    child.style = discord.ButtonStyle.primary
-                else:
-                    child.style = discord.ButtonStyle.secondary
-    
-    def generate_leaderboard_image(self, period: str):
-        """Generate leaderboard image for the given period."""
+
+        # Period selector dropdown
+        self.period_select = LeaderboardPeriodSelect(self)
+        self.add_item(self.period_select)
+
+    def _collect_leaderboard(self, period: str):
         col = self.column_map[period]
         metric_label = self.metric_labels[self.metric]
-        
-        # Collect all player stats with level info
+
         leaderboard = []
         for sheet_name in self.wb.sheetnames:
             if sheet_name.casefold() == "sheep wars historical data":
                 continue
             try:
                 sheet = self.wb[sheet_name]
-                
+
                 # Find stat rows dynamically
                 stat_rows = {}
                 for i in range(1, 100):
@@ -2570,10 +2855,9 @@ class LeaderboardView(discord.ui.View):
                         stat_key = str(stat_name).lower()
                         if stat_key not in stat_rows:  # Store first occurrence
                             stat_rows[stat_key] = i
-                
-                # Get base values from appropriate column
+
                 metric_value = None
-                
+
                 if self.metric == "kdr":
                     kills = _to_number(sheet[f"{col}{stat_rows.get('kills', 1)}"].value)
                     deaths = _to_number(sheet[f"{col}{stat_rows.get('deaths', 1)}"].value)
@@ -2583,14 +2867,12 @@ class LeaderboardView(discord.ui.View):
                     losses = _to_number(sheet[f"{col}{stat_rows.get('losses', 1)}"].value)
                     metric_value = round(wins / losses, 2) if losses > 0 else wins
                 else:
-                    # Find the stat row for this metric
                     metric_key = self.metric
                     if metric_key in stat_rows:
                         value = sheet[f"{col}{stat_rows[metric_key]}"].value
                         metric_value = _to_number(value)
-                
+
                 if metric_value is not None and isinstance(metric_value, (int, float)):
-                    # Get level for prestige display
                     try:
                         level_value = 0
                         level_row = None
@@ -2611,62 +2893,212 @@ class LeaderboardView(discord.ui.View):
                             level_value = int((exp or 0) / 5000)
                     except Exception:
                         level_value = 0
-                    
+
                     icon = get_prestige_icon(level_value)
                     is_playtime = self.metric == "playtime"
-                    
-                    # Get user color
                     ign_color = self.user_colors.get(sheet_name.lower())
-                    
+
                     leaderboard.append((sheet_name, float(metric_value), metric_value, is_playtime, level_value, icon, ign_color))
-                
+
             except Exception:
                 continue
-        
-        # Sort by value descending
+
         leaderboard.sort(key=lambda x: x[1], reverse=True)
-        
+        return metric_label, leaderboard
+
+    def _paginate(self, leaderboard: list, page: int):
+        total_pages = max(1, (len(leaderboard) + self.page_size - 1) // self.page_size)
+        clamped_page = max(0, min(page, total_pages - 1))
+        start_index = clamped_page * self.page_size
+        return leaderboard[start_index:start_index + self.page_size], total_pages, clamped_page, start_index
+
+    def generate_leaderboard_image(self, period: str, page: int):
+        metric_label, leaderboard = self._collect_leaderboard(period)
+
         if not leaderboard:
-            # Return None if no data
-            return None, None
-        
-        # Prepare data for image generation (top 10 only)
+            empty_embed = self.get_leaderboard_embed(period, page=0, total_pages=1, leaderboard=leaderboard)
+            return empty_embed, None, 1
+
+        sliced, total_pages, clamped_page, start_index = self._paginate(leaderboard, page)
+        self.page = clamped_page
+
         image_data = []
-        for i, entry in enumerate(leaderboard[:10], 1):
+        for idx, entry in enumerate(sliced):
             player = entry[0]
             value = entry[2]
             is_playtime = entry[3]
             level_value = entry[4]
             icon = entry[5]
             ign_color = entry[6]
-            
-            image_data.append((i, player, level_value, icon, ign_color, value, is_playtime))
-        
+            image_data.append((start_index + idx + 1, player, level_value, icon, ign_color, value, is_playtime))
+
         if Image is not None:
             try:
-                img_io = create_leaderboard_image(period.title(), metric_label, image_data)
-                filename = f"leaderboard_{self.metric}_{period}.png"
-                return None, discord.File(img_io, filename=filename)
+                img_io = create_leaderboard_image(period.title(), metric_label, image_data, page=clamped_page, total_pages=total_pages)
+                filename = f"leaderboard_{self.metric}_{period}_p{clamped_page + 1}.png"
+                return None, discord.File(img_io, filename=filename), total_pages
             except Exception as e:
                 print(f"[WARNING] Leaderboard image generation failed: {e}")
-                # Fall back to embed
-                return self.get_leaderboard_embed(period), None
+                return self.get_leaderboard_embed(period, clamped_page, total_pages, leaderboard), None, total_pages
         else:
-            # Fall back to embed if Pillow not available
-            return self.get_leaderboard_embed(period), None
-    
-    def get_leaderboard_embed(self, period: str):
+            return self.get_leaderboard_embed(period, clamped_page, total_pages, leaderboard), None, total_pages
+
+    def get_leaderboard_embed(self, period: str, page: int = 0, total_pages: int = 1, leaderboard: list | None = None):
+        metric_label, leaderboard_data = self._collect_leaderboard(period) if leaderboard is None else (self.metric_labels[self.metric], leaderboard)
+
+        if not leaderboard_data:
+            embed = discord.Embed(
+                title=f"{period.title()} {metric_label} Leaderboard",
+                description="No data available",
+                color=discord.Color.from_rgb(54, 57, 63)
+            )
+            return embed
+
+        sliced, total_pages, clamped_page, start_index = self._paginate(leaderboard_data, page)
+        self.page = clamped_page
+
+        embed = discord.Embed(
+            title=f"{period.title()} {metric_label} Leaderboard",
+            color=discord.Color.from_rgb(54, 57, 63)
+        )
+
+        description_lines = []
+        for idx, entry in enumerate(sliced):
+            player = entry[0]
+            value = entry[2]
+            is_playtime = entry[3]
+            level_value = entry[4]
+            icon = entry[5]
+
+            medal = {1: "1.", 2: "2.", 3: "3."}.get(start_index + idx + 1, f"{start_index + idx + 1}.")
+            prestige_display = format_prestige_ansi(level_value, icon)
+
+            if is_playtime:
+                formatted_value = format_playtime(int(value))
+            else:
+                formatted_value = f"{value}"
+
+            description_lines.append(f"{medal} {prestige_display} {player}: {formatted_value}")
+
+        embed.description = f"```ansi\n" + "\n".join(description_lines) + "\n```"
+        embed.set_footer(text=f"Page {clamped_page + 1} of {total_pages}")
+        return embed
+
+    async def _refresh(self, interaction: discord.Interaction, *, new_period: str | None = None, page_delta: int = 0):
+        if new_period is not None:
+            self.current_period = new_period
+            self.page = 0
+            # sync dropdown defaults
+            for option in self.period_select.options:
+                option.default = option.value == new_period
+        else:
+            self.page += page_delta
+
+        embed, file, _ = self.generate_leaderboard_image(self.current_period, self.page)
+
+        if file:
+            await interaction.response.edit_message(view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Prev Page", custom_id="page_prev", style=discord.ButtonStyle.secondary)
+    async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._refresh(interaction, page_delta=-1)
+
+    @discord.ui.button(label="Next Page", custom_id="page_next", style=discord.ButtonStyle.secondary)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._refresh(interaction, page_delta=1)
+
+
+class LeaderboardPeriodSelect(discord.ui.Select):
+    def __init__(self, view: LeaderboardView):
+        options = [
+            discord.SelectOption(label="Lifetime", value="lifetime", default=True),
+            discord.SelectOption(label="Session", value="session"),
+            discord.SelectOption(label="Daily", value="daily"),
+            discord.SelectOption(label="Yesterday", value="yesterday"),
+            discord.SelectOption(label="Monthly", value="monthly"),
+        ]
+        super().__init__(
+            placeholder="Select leaderboard period",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="leaderboard_period_select",
+        )
+        self.view_ref = view
+
+    async def callback(self, interaction: discord.Interaction):
+        selected = self.values[0]
+        for opt in self.options:
+            opt.default = opt.value == selected
+        await self.view_ref._refresh(interaction, new_period=selected)
+
+
+class RatioLeaderboardView(discord.ui.View):
+    def __init__(self, metric: str, wb):
+        super().__init__()
+        self.metric = metric
+        self.wb = wb
+        self.current_period = "lifetime"
+        self.page = 0
+        self.page_size = 10
+        
+        # Column mappings for each period
+        self.column_map = {
+            "lifetime": "B",      # All-time values
+            # Use the DELTA columns for period comparisons
+            "session": "C",       # Session Delta
+            "daily": "E",         # Daily Delta
+            "yesterday": "G",     # Yesterday Delta
+            "monthly": "I",       # Monthly Delta
+        }
+        
+        self.metric_labels = {
+            "wl_ratio": "W/L Ratio",
+            "kd_ratio": "K/D Ratio",
+            "kills_per_game": "Kills/Game",
+            "kills_per_win": "Kills/Win",
+            "damage_per_game": "Damage/Game",
+            "damage_per_sheep": "Damage/Sheep",
+            "wools_per_game": "Wools/Game",
+            "void_kd_ratio": "Void K/D Ratio",
+            "explosive_kd_ratio": "Explosive K/D Ratio",
+            "bow_kd_ratio": "Bow K/D Ratio",
+            "melee_kd_ratio": "Melee K/D Ratio",
+            "exp_per_hour": "EXP/Hour",
+            "exp_per_game": "EXP/Game",
+        }
+        
+        # Load user colors
+        self.user_colors = {}
+        try:
+            if os.path.exists(USER_COLORS_FILE):
+                with open(USER_COLORS_FILE, 'r') as f:
+                    color_data = json.load(f)
+                    for username, user_entry in color_data.items():
+                        if isinstance(user_entry, str):
+                            self.user_colors[username] = user_entry
+                        elif isinstance(user_entry, dict):
+                            self.user_colors[username] = user_entry.get('color')
+        except Exception as e:
+            print(f"[WARNING] Failed to load user colors: {e}")
+
+        # Period selector dropdown
+        self.period_select = RatioPeriodSelect(self)
+        self.add_item(self.period_select)
+
+    def _collect_leaderboard(self, period: str):
         col = self.column_map[period]
         metric_label = self.metric_labels[self.metric]
-        
-        # Collect all player stats with level info
+
         leaderboard = []
         for sheet_name in self.wb.sheetnames:
             if sheet_name.casefold() == "sheep wars historical data":
                 continue
             try:
                 sheet = self.wb[sheet_name]
-                
+
                 # Find stat rows dynamically
                 stat_rows = {}
                 for i in range(1, 100):
@@ -2675,27 +3107,66 @@ class LeaderboardView(discord.ui.View):
                         stat_key = str(stat_name).lower()
                         if stat_key not in stat_rows:  # Store first occurrence
                             stat_rows[stat_key] = i
-                
-                # Get base values from appropriate column
+
                 metric_value = None
-                
-                if self.metric == "kdr":
-                    kills = _to_number(sheet[f"{col}{stat_rows.get('kills', 1)}"].value)
-                    deaths = _to_number(sheet[f"{col}{stat_rows.get('deaths', 1)}"].value)
-                    metric_value = round(kills / deaths, 2) if deaths > 0 else kills
-                elif self.metric == "wlr":
+
+                # Calculate ratios
+                if self.metric == "wl_ratio":
                     wins = _to_number(sheet[f"{col}{stat_rows.get('wins', 1)}"].value)
                     losses = _to_number(sheet[f"{col}{stat_rows.get('losses', 1)}"].value)
                     metric_value = round(wins / losses, 2) if losses > 0 else wins
-                else:
-                    # Find the stat row for this metric
-                    metric_key = self.metric
-                    if metric_key in stat_rows:
-                        value = sheet[f"{col}{stat_rows[metric_key]}"].value
-                        metric_value = _to_number(value)
-                
+                elif self.metric == "kd_ratio":
+                    kills = _to_number(sheet[f"{col}{stat_rows.get('kills', 1)}"].value)
+                    deaths = _to_number(sheet[f"{col}{stat_rows.get('deaths', 1)}"].value)
+                    metric_value = round(kills / deaths, 2) if deaths > 0 else kills
+                elif self.metric == "kills_per_game":
+                    kills = _to_number(sheet[f"{col}{stat_rows.get('kills', 1)}"].value)
+                    games = _to_number(sheet[f"{col}{stat_rows.get('games_played', 1)}"].value)
+                    metric_value = round(kills / games, 2) if games > 0 else 0
+                elif self.metric == "kills_per_win":
+                    kills = _to_number(sheet[f"{col}{stat_rows.get('kills', 1)}"].value)
+                    wins = _to_number(sheet[f"{col}{stat_rows.get('wins', 1)}"].value)
+                    metric_value = round(kills / wins, 2) if wins > 0 else 0
+                elif self.metric == "damage_per_game":
+                    damage = _to_number(sheet[f"{col}{stat_rows.get('damage_dealt', 1)}"].value)
+                    games = _to_number(sheet[f"{col}{stat_rows.get('games_played', 1)}"].value)
+                    metric_value = round(damage / games, 2) if games > 0 else 0
+                elif self.metric == "damage_per_sheep":
+                    damage = _to_number(sheet[f"{col}{stat_rows.get('damage_dealt', 1)}"].value)
+                    sheep = _to_number(sheet[f"{col}{stat_rows.get('sheep_thrown', 1)}"].value)
+                    metric_value = round(damage / sheep, 2) if sheep > 0 else 0
+                elif self.metric == "wools_per_game":
+                    wools = _to_number(sheet[f"{col}{stat_rows.get('magic_wool_hit', 1)}"].value)
+                    games = _to_number(sheet[f"{col}{stat_rows.get('games_played', 1)}"].value)
+                    metric_value = round(wools / games, 2) if games > 0 else 0
+                elif self.metric == "void_kd_ratio":
+                    void_kills = _to_number(sheet[f"{col}{stat_rows.get('kills_void', 1)}"].value)
+                    void_deaths = _to_number(sheet[f"{col}{stat_rows.get('deaths_void', 1)}"].value)
+                    metric_value = round(void_kills / void_deaths, 2) if void_deaths > 0 else void_kills
+                elif self.metric == "explosive_kd_ratio":
+                    exp_kills = _to_number(sheet[f"{col}{stat_rows.get('kills_explosive', 1)}"].value)
+                    exp_deaths = _to_number(sheet[f"{col}{stat_rows.get('deaths_explosive', 1)}"].value)
+                    metric_value = round(exp_kills / exp_deaths, 2) if exp_deaths > 0 else exp_kills
+                elif self.metric == "bow_kd_ratio":
+                    bow_kills = _to_number(sheet[f"{col}{stat_rows.get('kills_bow', 1)}"].value)
+                    bow_deaths = _to_number(sheet[f"{col}{stat_rows.get('deaths_bow', 1)}"].value)
+                    metric_value = round(bow_kills / bow_deaths, 2) if bow_deaths > 0 else bow_kills
+                elif self.metric == "melee_kd_ratio":
+                    melee_kills = _to_number(sheet[f"{col}{stat_rows.get('kills_melee', 1)}"].value)
+                    melee_deaths = _to_number(sheet[f"{col}{stat_rows.get('deaths_melee', 1)}"].value)
+                    metric_value = round(melee_kills / melee_deaths, 2) if melee_deaths > 0 else melee_kills
+                elif self.metric == "exp_per_hour":
+                    exp = _to_number(sheet[f"{col}{stat_rows.get('experience', 1)}"].value)
+                    playtime = _to_number(sheet[f"{col}{stat_rows.get('playtime', 1)}"].value)
+                    # playtime is in minutes
+                    hours = playtime / 60
+                    metric_value = round(exp / hours, 2) if hours > 0 else 0
+                elif self.metric == "exp_per_game":
+                    exp = _to_number(sheet[f"{col}{stat_rows.get('experience', 1)}"].value)
+                    games = _to_number(sheet[f"{col}{stat_rows.get('games_played', 1)}"].value)
+                    metric_value = round(exp / games, 2) if games > 0 else 0
+
                 if metric_value is not None and isinstance(metric_value, (int, float)):
-                    # Get level for prestige display
                     try:
                         level_value = 0
                         level_row = None
@@ -2716,103 +3187,140 @@ class LeaderboardView(discord.ui.View):
                             level_value = int((exp or 0) / 5000)
                     except Exception:
                         level_value = 0
-                    
+
                     icon = get_prestige_icon(level_value)
-                    is_playtime = self.metric == "playtime"
-                    leaderboard.append((sheet_name, float(metric_value), metric_value, is_playtime, level_value, icon))
-                
+                    ign_color = self.user_colors.get(sheet_name.lower())
+
+                    leaderboard.append((sheet_name, float(metric_value), metric_value, level_value, icon, ign_color))
+
             except Exception:
                 continue
-        
-        # Sort by value descending
+
         leaderboard.sort(key=lambda x: x[1], reverse=True)
-        
-        # Build embed
+        return metric_label, leaderboard
+
+    def _paginate(self, leaderboard: list, page: int):
+        total_pages = max(1, (len(leaderboard) + self.page_size - 1) // self.page_size)
+        clamped_page = max(0, min(page, total_pages - 1))
+        start_index = clamped_page * self.page_size
+        return leaderboard[start_index:start_index + self.page_size], total_pages, clamped_page, start_index
+
+    def generate_leaderboard_image(self, period: str, page: int):
+        metric_label, leaderboard = self._collect_leaderboard(period)
+
+        if not leaderboard:
+            empty_embed = self.get_leaderboard_embed(period, page=0, total_pages=1, leaderboard=leaderboard)
+            return empty_embed, None, 1
+
+        sliced, total_pages, clamped_page, start_index = self._paginate(leaderboard, page)
+        self.page = clamped_page
+
+        image_data = []
+        for idx, entry in enumerate(sliced):
+            player = entry[0]
+            value = entry[2]
+            level_value = entry[3]
+            icon = entry[4]
+            ign_color = entry[5]
+            image_data.append((start_index + idx + 1, player, level_value, icon, ign_color, value, False))
+
+        if Image is not None:
+            try:
+                img_io = create_leaderboard_image(period.title(), metric_label, image_data, page=clamped_page, total_pages=total_pages)
+                filename = f"ratio_leaderboard_{self.metric}_{period}_p{clamped_page + 1}.png"
+                return None, discord.File(img_io, filename=filename), total_pages
+            except Exception as e:
+                print(f"[WARNING] Ratio leaderboard image generation failed: {e}")
+                return self.get_leaderboard_embed(period, clamped_page, total_pages, leaderboard), None, total_pages
+        else:
+            return self.get_leaderboard_embed(period, clamped_page, total_pages, leaderboard), None, total_pages
+
+    def get_leaderboard_embed(self, period: str, page: int = 0, total_pages: int = 1, leaderboard: list | None = None):
+        metric_label, leaderboard_data = self._collect_leaderboard(period) if leaderboard is None else (self.metric_labels[self.metric], leaderboard)
+
+        if not leaderboard_data:
+            embed = discord.Embed(
+                title=f"{period.title()} {metric_label} Leaderboard",
+                description="No data available",
+                color=discord.Color.from_rgb(54, 57, 63)
+            )
+            return embed
+
+        sliced, total_pages, clamped_page, start_index = self._paginate(leaderboard_data, page)
+        self.page = clamped_page
+
         embed = discord.Embed(
             title=f"{period.title()} {metric_label} Leaderboard",
             color=discord.Color.from_rgb(54, 57, 63)
         )
-        
-        if not leaderboard:
-            embed.description = "No data available"
-        else:
-            # Top 10 with colored prestige prefix
-            description_lines = []
-            ansi_code = get_ansi_color_code
-            reset_code = "\u001b[0m"
-            
-            for i, entry in enumerate(leaderboard[:10], 1):
-                player = entry[0]
-                value = entry[2]
-                is_playtime = entry[3]
-                level_value = entry[4]
-                icon = entry[5]
-                
-                medal = {1: "1.", 2: "2.", 3: "3."}.get(i, f"{i}.")
-                # Use multi-color formatter for leaderboard prefix
-                prestige_display = format_prestige_ansi(level_value, icon)
-                
-                # Format value based on type
-                if is_playtime:
-                    formatted_value = format_playtime(int(value))
-                else:
-                    formatted_value = f"{value}"
-                
-                description_lines.append(f"{medal} {prestige_display} {player}: {formatted_value}")
-            
-            embed.description = f"```ansi\n" + "\n".join(description_lines) + "\n```"
-        
+
+        description_lines = []
+        for idx, entry in enumerate(sliced):
+            player = entry[0]
+            value = entry[2]
+            level_value = entry[3]
+            icon = entry[4]
+
+            medal = {1: "1.", 2: "2.", 3: "3."}.get(start_index + idx + 1, f"{start_index + idx + 1}.")
+            prestige_display = format_prestige_ansi(level_value, icon)
+
+            formatted_value = f"{value}"
+
+            description_lines.append(f"{medal} {prestige_display} {player}: {formatted_value}")
+
+        embed.description = f"```ansi\n" + "\n".join(description_lines) + "\n```"
+        embed.set_footer(text=f"Page {clamped_page + 1} of {total_pages}")
         return embed
-    
-    @discord.ui.button(label="Lifetime", custom_id="lifetime", style=discord.ButtonStyle.primary)
-    async def lifetime_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.current_period = "lifetime"
-        self.update_buttons()
-        embed, file = self.generate_leaderboard_image(self.current_period)
+
+    async def _refresh(self, interaction: discord.Interaction, *, new_period: str | None = None, page_delta: int = 0):
+        if new_period is not None:
+            self.current_period = new_period
+            self.page = 0
+            # sync dropdown defaults
+            for option in self.period_select.options:
+                option.default = option.value == new_period
+        else:
+            self.page += page_delta
+
+        embed, file, _ = self.generate_leaderboard_image(self.current_period, self.page)
+
         if file:
             await interaction.response.edit_message(view=self, attachments=[file])
         else:
             await interaction.response.edit_message(embed=embed, view=self)
-    
-    @discord.ui.button(label="Session", custom_id="session", style=discord.ButtonStyle.secondary)
-    async def session_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.current_period = "session"
-        self.update_buttons()
-        embed, file = self.generate_leaderboard_image(self.current_period)
-        if file:
-            await interaction.response.edit_message(view=self, attachments=[file])
-        else:
-            await interaction.response.edit_message(embed=embed, view=self)
-    
-    @discord.ui.button(label="Daily", custom_id="daily", style=discord.ButtonStyle.secondary)
-    async def daily_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.current_period = "daily"
-        self.update_buttons()
-        embed, file = self.generate_leaderboard_image(self.current_period)
-        if file:
-            await interaction.response.edit_message(view=self, attachments=[file])
-        else:
-            await interaction.response.edit_message(embed=embed, view=self)
-    
-    @discord.ui.button(label="Yesterday", custom_id="yesterday", style=discord.ButtonStyle.secondary)
-    async def yesterday_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.current_period = "yesterday"
-        self.update_buttons()
-        embed, file = self.generate_leaderboard_image(self.current_period)
-        if file:
-            await interaction.response.edit_message(view=self, attachments=[file])
-        else:
-            await interaction.response.edit_message(embed=embed, view=self)
-    
-    @discord.ui.button(label="Monthly", custom_id="monthly", style=discord.ButtonStyle.secondary)
-    async def monthly_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.current_period = "monthly"
-        self.update_buttons()
-        embed, file = self.generate_leaderboard_image(self.current_period)
-        if file:
-            await interaction.response.edit_message(view=self, attachments=[file])
-        else:
-            await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Prev Page", custom_id="page_prev_ratio", style=discord.ButtonStyle.secondary)
+    async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._refresh(interaction, page_delta=-1)
+
+    @discord.ui.button(label="Next Page", custom_id="page_next_ratio", style=discord.ButtonStyle.secondary)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._refresh(interaction, page_delta=1)
+
+
+class RatioPeriodSelect(discord.ui.Select):
+    def __init__(self, view: RatioLeaderboardView):
+        options = [
+            discord.SelectOption(label="Lifetime", value="lifetime", default=True),
+            discord.SelectOption(label="Session", value="session"),
+            discord.SelectOption(label="Daily", value="daily"),
+            discord.SelectOption(label="Yesterday", value="yesterday"),
+            discord.SelectOption(label="Monthly", value="monthly"),
+        ]
+        super().__init__(
+            placeholder="Select leaderboard period",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="ratio_leaderboard_period_select",
+        )
+        self.view_ref = view
+
+    async def callback(self, interaction: discord.Interaction):
+        selected = self.values[0]
+        for opt in self.options:
+            opt.default = opt.value == selected
+        await self.view_ref._refresh(interaction, new_period=selected)
 
 
 # Create bot with command tree for slash commands
@@ -2867,6 +3375,7 @@ async def on_ready():
     try:
         synced = await bot.tree.sync()
         print(f"[OK] Synced {len(synced)} command(s) - Instance ID: {bot_instance_id}")
+
     except Exception as e:
         print(f"[ERROR] Failed to sync commands: {e}")
     # start background tasks once
@@ -2913,7 +3422,7 @@ async def track(interaction: discord.Interaction, ign: str):
             wb = None
             try:
                 # FAILSAFE: Load workbook with guaranteed cleanup
-                wb = load_workbook(str(excel_file))
+                wb = load_workbook(str(excel_file), read_only=True, data_only=True)
                 sheet_exists = False
                 key = ign.casefold()
                 for sheet_name in wb.sheetnames:
@@ -3060,9 +3569,9 @@ async def untrack(interaction: discord.Interaction, ign: str):
         except (discord.errors.NotFound, discord.errors.HTTPException):
             return
     
-    # Check if user is authorized to untrack this username (must have it claimed)
-    if not is_user_authorized(interaction.user.id, ign):
-        await interaction.followup.send(f"[ERROR] You are not authorized to untrack {ign}. Only the user who claimed this username can untrack it.")
+    # Allow creator override; otherwise require claim authorization
+    if not (is_creator_user(interaction.user.id) or is_user_authorized(interaction.user.id, ign)):
+        await interaction.followup.send(f"[ERROR] You are not authorized to untrack {ign}. Only the user who claimed this username or the creator can untrack it.")
         return
     
     try:
@@ -3073,7 +3582,7 @@ async def untrack(interaction: discord.Interaction, ign: str):
             wb = None
             try:
                 # FAILSAFE: Load workbook with guaranteed cleanup
-                wb = load_workbook(str(excel_file))
+                wb = load_workbook(str(excel_file), read_only=True, data_only=True)
                 key = ign.casefold()
                 for sheet_name in wb.sheetnames:
                     if sheet_name.casefold() == key:
@@ -3135,20 +3644,34 @@ COLOR_CHOICES = [
 
 @bot.tree.command(name="color", description="Set a custom color for your username in stats displays")
 @discord.app_commands.describe(
-    ign="Minecraft IGN",
+    ign="Minecraft IGN (optional if you set /default)",
     color="Color for your username"
 )
 @discord.app_commands.choices(color=COLOR_CHOICES)
-async def color(interaction: discord.Interaction, ign: str, color: discord.app_commands.Choice[str]):
+async def color(interaction: discord.Interaction, ign: str = None, color: discord.app_commands.Choice[str] = None):
+    # Resolve default IGN if not provided, and validate before any heavy work
+    if ign is None or str(ign).strip() == "":
+        default_ign = get_default_user(interaction.user.id)
+        if not default_ign:
+            await interaction.response.send_message("You don't have a default username set. Use /default to set one.", ephemeral=True)
+            return
+        ign = default_ign
+    # Validate username via Mojang API and simple format
+    ok, proper_ign = validate_and_normalize_ign(ign)
+    if not ok:
+        await interaction.response.send_message(f"The username {ign} is invalid.", ephemeral=True)
+        return
+    ign = proper_ign
+
     if not interaction.response.is_done():
         try:
-            await interaction.response.defer()
+            await interaction.response.defer(ephemeral=True)
         except (discord.errors.NotFound, discord.errors.HTTPException):
-            return
+            pass
     
     # Check if user is authorized to change color for this username
     if not is_user_authorized(interaction.user.id, ign):
-        await interaction.followup.send(f"[ERROR] You are not authorized to change the color for {ign}. Only the user who claimed this username can change its color.")
+        await interaction.followup.send(f"[ERROR] You are not authorized to change the color for {ign}. Only the user who claimed this username can change its color.", ephemeral=True)
         return
     
     try:
@@ -3179,37 +3702,50 @@ async def color(interaction: discord.Interaction, ign: str, color: discord.app_c
         with open(USER_COLORS_FILE, 'w') as f:
             json.dump(color_data, f, indent=2)
         
-        await interaction.followup.send(f"Successfully set {ign}'s username color to {color.name}!")
+        await interaction.followup.send(f"Successfully set {ign}'s username color to {color.name}!", ephemeral=True)
         
     except Exception as e:
-        await interaction.followup.send(f"[ERROR] Failed to set color: {str(e)}")
+        await interaction.followup.send(f"[ERROR] Failed to set color: {str(e)}", ephemeral=True)
 
 @bot.tree.command(name="reset", description="Reset session snapshot for a player")
-@discord.app_commands.describe(ign="Minecraft IGN")
-async def reset(interaction: discord.Interaction, ign: str):
+@discord.app_commands.describe(ign="Minecraft IGN (optional if you set /default)")
+async def reset(interaction: discord.Interaction, ign: str = None):
+    # Resolve default IGN and validate before any heavy work
+    if ign is None or str(ign).strip() == "":
+        default_ign = get_default_user(interaction.user.id)
+        if not default_ign:
+            await interaction.response.send_message("You don't have a default username set. Use /default to set one.", ephemeral=True)
+            return
+        ign = default_ign
+    ok, proper_ign = validate_and_normalize_ign(ign)
+    if not ok:
+        await interaction.response.send_message(f"The username {ign} is invalid.", ephemeral=True)
+        return
+    ign = proper_ign
+
     if not interaction.response.is_done():
         try:
-            await interaction.response.defer()
+            await interaction.response.defer(ephemeral=True)
         except (discord.errors.NotFound, discord.errors.HTTPException):
-            return
+            pass
     
     # Check if user is authorized to reset session for this username
     if not is_user_authorized(interaction.user.id, ign):
-        await interaction.followup.send(f"[ERROR] You are not authorized to reset session for {ign}. Only the user who claimed this username can reset its session.")
+        await interaction.followup.send(f"[ERROR] You are not authorized to reset session for {ign}. Only the user who claimed this username can reset its session.", ephemeral=True)
         return
     
     try:
         result = run_script("api_get.py", ["-ign", ign, "-session"])
 
         if result.returncode == 0:
-            await interaction.followup.send(f"Session snapshot reset for {ign}.")
+            await interaction.followup.send(f"Session snapshot reset for {ign}.", ephemeral=True)
         else:
             err = (result.stderr or result.stdout) or "Unknown error"
-            await interaction.followup.send(f"[ERROR] {sanitize_output(err)}")
+            await interaction.followup.send(f"[ERROR] {sanitize_output(err)}", ephemeral=True)
     except subprocess.TimeoutExpired:
-        await interaction.followup.send("[ERROR] Command timed out (30s limit)")
+        await interaction.followup.send("[ERROR] Command timed out (30s limit)", ephemeral=True)
     except Exception as e:
-        await interaction.followup.send(f"[ERROR] {str(e)}")
+        await interaction.followup.send(f"[ERROR] {str(e)}", ephemeral=True)
 
 @bot.tree.command(name="dmme", description="Send yourself a test DM from the bot")
 async def dmme(interaction: discord.Interaction):
@@ -3223,6 +3759,52 @@ async def dmme(interaction: discord.Interaction):
         await interaction.followup.send("Sent you a DM.", ephemeral=True)
     except Exception as e:
         await interaction.followup.send("Couldn't DM you. Check your privacy settings (Allow DMs from server members).", ephemeral=True)
+
+
+@bot.tree.command(name="default", description="Set your default Minecraft username")
+@discord.app_commands.describe(ign="Minecraft IGN to use by default")
+async def default(interaction: discord.Interaction, ign: str):
+    # Validate username before persisting
+    ok, proper_ign = validate_and_normalize_ign(ign)
+    if not ok:
+        await interaction.response.send_message(f"The username {ign} is invalid.", ephemeral=True)
+        return
+
+    # Quick response, no heavy work
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            pass
+    try:
+        # Optionally validate tracked status to help users
+        excel_file = BOT_DIR / "stats.xlsx"
+        is_known = False
+        if excel_file.exists():
+            wb = None
+            try:
+                wb = load_workbook(str(excel_file), read_only=True, data_only=True)
+                key = proper_ign.casefold()
+                for sheet_name in wb.sheetnames:
+                    if sheet_name.casefold() == key:
+                        is_known = True
+                        break
+            except Exception:
+                pass
+            finally:
+                if wb is not None:
+                    try:
+                        wb.close()
+                    except Exception:
+                        pass
+
+        set_default_user(interaction.user.id, proper_ign)
+        if is_known:
+            await interaction.followup.send(f"Default username set to {proper_ign}.", ephemeral=True)
+        else:
+            await interaction.followup.send(f"Default username set to {proper_ign}. Note: {proper_ign} is not tracked yet; some commands may fail until you run /track.", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"[ERROR] Failed to set default: {str(e)}", ephemeral=True)
 
 
 @bot.tree.command(name="prestige", description="Display a prestige prefix for any level")
@@ -3498,9 +4080,22 @@ async def refresh(interaction: discord.Interaction, mode: discord.app_commands.C
 
 
 @bot.tree.command(name="stats", description="Get full player stats (Template.xlsx layout) with deltas")
-@discord.app_commands.describe(ign="Minecraft IGN")
-async def stats(interaction: discord.Interaction, ign: str):
+@discord.app_commands.describe(ign="Minecraft IGN (optional if you set /default)")
+async def stats(interaction: discord.Interaction, ign: str = None):
     print(f"[DEBUG] /stats triggered for IGN: {ign} by user: {interaction.user.name} in guild: {interaction.guild.name if interaction.guild else 'DM'}")
+    # Resolve default IGN if not provided
+    if ign is None or str(ign).strip() == "":
+        default_ign = get_default_user(interaction.user.id)
+        if not default_ign:
+            await interaction.response.send_message("You don't have a default username set. Use /default to set one.", ephemeral=True)
+            return
+        ign = default_ign
+    # Validate username early
+    ok, proper_ign = validate_and_normalize_ign(ign)
+    if not ok:
+        await interaction.response.send_message(f"The username {ign} is invalid.", ephemeral=True)
+        return
+    ign = proper_ign
     
     if not interaction.response.is_done():
         try:
@@ -3532,7 +4127,7 @@ async def stats(interaction: discord.Interaction, ign: str):
 
         wb = None
         try:
-            wb = load_workbook(EXCEL_FILE)
+            wb = load_workbook(EXCEL_FILE, read_only=True, data_only=True)
 
             key = ign.casefold()
             found_sheet = None
@@ -3605,10 +4200,165 @@ async def stats(interaction: discord.Interaction, ign: str):
     except Exception as e:
         await interaction.followup.send(f"[ERROR] {str(e)}")
 
+
+@bot.tree.command(name="killdistribution", description="View kill-type distribution as a pie chart")
+@discord.app_commands.describe(ign="Minecraft IGN (optional if you set /default)")
+async def killdistribution(interaction: discord.Interaction, ign: str = None):
+    # Resolve default IGN if not provided
+    if ign is None or str(ign).strip() == "":
+        default_ign = get_default_user(interaction.user.id)
+        if not default_ign:
+            await interaction.response.send_message("You don't have a default username set. Use /default to set one.", ephemeral=True)
+            return
+        ign = default_ign
+    # Validate username early
+    ok, proper_ign = validate_and_normalize_ign(ign)
+    if not ok:
+        await interaction.response.send_message(f"The username {ign} is invalid.", ephemeral=True)
+        return
+    ign = proper_ign
+
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            return
+
+    try:
+        result = run_script("api_get.py", ["-ign", ign])
+        if result.returncode != 0 and not (result.stderr and "429" in result.stderr):
+            error_msg = result.stderr or result.stdout or "Unknown error"
+            await interaction.followup.send(f"[ERROR] Failed to fetch stats:\n```{error_msg[:500]}```")
+            return
+
+        EXCEL_FILE = BOT_DIR / "stats.xlsx"
+        if not EXCEL_FILE.exists():
+            await interaction.followup.send("[ERROR] Excel file not found")
+            return
+
+        wb = None
+        try:
+            wb = load_workbook(EXCEL_FILE, read_only=True, data_only=True)
+
+            key = ign.casefold()
+            found_sheet = None
+            actual_ign = ign
+            for sheet_name in wb.sheetnames:
+                if sheet_name.casefold() == key:
+                    found_sheet = wb[sheet_name]
+                    actual_ign = sheet_name
+                    break
+
+            if found_sheet is None:
+                await interaction.followup.send(f"[ERROR] Player sheet '{ign}' not found")
+                return
+
+            view = DistributionView(found_sheet, actual_ign, mode="kill")
+            embed, file = view.generate_distribution("all-time")
+
+            if file:
+                await interaction.followup.send(file=file, view=view)
+            else:
+                await interaction.followup.send(embed=embed, view=view)
+        finally:
+            if wb is not None:
+                try:
+                    wb.close()
+                except Exception:
+                    pass
+    except subprocess.TimeoutExpired:
+        await interaction.followup.send("[ERROR] Command timed out (30s limit)")
+    except Exception as e:
+        await interaction.followup.send(f"[ERROR] {str(e)}")
+
+
+@bot.tree.command(name="deathdistribution", description="View death-type distribution as a pie chart")
+@discord.app_commands.describe(ign="Minecraft IGN (optional if you set /default)")
+async def deathdistribution(interaction: discord.Interaction, ign: str = None):
+    # Resolve default IGN if not provided
+    if ign is None or str(ign).strip() == "":
+        default_ign = get_default_user(interaction.user.id)
+        if not default_ign:
+            await interaction.response.send_message("You don't have a default username set. Use /default to set one.", ephemeral=True)
+            return
+        ign = default_ign
+    # Validate username early
+    ok, proper_ign = validate_and_normalize_ign(ign)
+    if not ok:
+        await interaction.response.send_message(f"The username {ign} is invalid.", ephemeral=True)
+        return
+    ign = proper_ign
+
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            return
+
+    try:
+        result = run_script("api_get.py", ["-ign", ign])
+        if result.returncode != 0 and not (result.stderr and "429" in result.stderr):
+            error_msg = result.stderr or result.stdout or "Unknown error"
+            await interaction.followup.send(f"[ERROR] Failed to fetch stats:\n```{error_msg[:500]}```")
+            return
+
+        EXCEL_FILE = BOT_DIR / "stats.xlsx"
+        if not EXCEL_FILE.exists():
+            await interaction.followup.send("[ERROR] Excel file not found")
+            return
+
+        wb = None
+        try:
+            wb = load_workbook(EXCEL_FILE, read_only=True, data_only=True)
+
+            key = ign.casefold()
+            found_sheet = None
+            actual_ign = ign
+            for sheet_name in wb.sheetnames:
+                if sheet_name.casefold() == key:
+                    found_sheet = wb[sheet_name]
+                    actual_ign = sheet_name
+                    break
+
+            if found_sheet is None:
+                await interaction.followup.send(f"[ERROR] Player sheet '{ign}' not found")
+                return
+
+            view = DistributionView(found_sheet, actual_ign, mode="death")
+            embed, file = view.generate_distribution("all-time")
+
+            if file:
+                await interaction.followup.send(file=file, view=view)
+            else:
+                await interaction.followup.send(embed=embed, view=view)
+        finally:
+            if wb is not None:
+                try:
+                    wb.close()
+                except Exception:
+                    pass
+    except subprocess.TimeoutExpired:
+        await interaction.followup.send("[ERROR] Command timed out (30s limit)")
+    except Exception as e:
+        await interaction.followup.send(f"[ERROR] {str(e)}")
+
 @bot.tree.command(name="sheepwars", description="Get player stats with deltas")
-@discord.app_commands.describe(ign="Minecraft IGN")
-async def sheepwars(interaction: discord.Interaction, ign: str):
+@discord.app_commands.describe(ign="Minecraft IGN (optional if you set /default)")
+async def sheepwars(interaction: discord.Interaction, ign: str = None):
     print(f"[DEBUG] /sheepwars triggered for IGN: {ign} by user: {interaction.user.name} in guild: {interaction.guild.name if interaction.guild else 'DM'}")
+    # Resolve default IGN if not provided
+    if ign is None or str(ign).strip() == "":
+        default_ign = get_default_user(interaction.user.id)
+        if not default_ign:
+            await interaction.response.send_message("You don't have a default username set. Use /default to set one.", ephemeral=True)
+            return
+        ign = default_ign
+    # Validate username early
+    ok, proper_ign = validate_and_normalize_ign(ign)
+    if not ok:
+        await interaction.response.send_message(f"The username {ign} is invalid.", ephemeral=True)
+        return
+    ign = proper_ign
     
     # Defer FIRST, before any long operations
     if not interaction.response.is_done():
@@ -3659,7 +4409,7 @@ async def sheepwars(interaction: discord.Interaction, ign: str):
         wb = None
         try:
             # FAILSAFE: Load workbook with guaranteed cleanup
-            wb = load_workbook(EXCEL_FILE)
+            wb = load_workbook(EXCEL_FILE, read_only=True, data_only=True)
             
             # Find sheet case-insensitively
             key = ign.casefold()
@@ -3670,6 +4420,10 @@ async def sheepwars(interaction: discord.Interaction, ign: str):
                     found_sheet = wb[sheet_name]
                     actual_ign = sheet_name  # Get the properly cased username
                     break
+            
+            if found_sheet is None:
+                if wb is not None:
+                    wb.close()
             
             if found_sheet is None:
                 await interaction.followup.send(f"[ERROR] Player sheet '{ign}' not found")
@@ -3779,9 +4533,9 @@ async def leaderboard(interaction: discord.Interaction, metric: discord.app_comm
             await interaction.followup.send("[ERROR] Excel file not found")
             return
         # FAILSAFE: Load workbook with guaranteed cleanup
-        wb = load_workbook(EXCEL_FILE)
+        wb = load_workbook(EXCEL_FILE, read_only=True, data_only=True)
         view = LeaderboardView(metric.value, wb)
-        embed, file = view.generate_leaderboard_image("lifetime")
+        embed, file, _ = view.generate_leaderboard_image("lifetime", 0)
         if file:
             await interaction.followup.send(view=view, file=file)
         else:
@@ -3819,9 +4573,9 @@ async def kill_leaderboard(interaction: discord.Interaction, metric: discord.app
             await interaction.followup.send("[ERROR] Excel file not found")
             return
         # FAILSAFE: Load workbook with guaranteed cleanup
-        wb = load_workbook(EXCEL_FILE)
+        wb = load_workbook(EXCEL_FILE, read_only=True, data_only=True)
         view = LeaderboardView(metric.value, wb)
-        embed, file = view.generate_leaderboard_image("lifetime")
+        embed, file, _ = view.generate_leaderboard_image("lifetime", 0)
         if file:
             await interaction.followup.send(file=file, view=view)
         else:
@@ -3859,9 +4613,57 @@ async def death_leaderboard(interaction: discord.Interaction, metric: discord.ap
             await interaction.followup.send("[ERROR] Excel file not found")
             return
         # FAILSAFE: Load workbook with guaranteed cleanup
-        wb = load_workbook(EXCEL_FILE)
+        wb = load_workbook(EXCEL_FILE, read_only=True, data_only=True)
         view = LeaderboardView(metric.value, wb)
-        embed, file = view.generate_leaderboard_image("lifetime")
+        embed, file, _ = view.generate_leaderboard_image("lifetime", 0)
+        if file:
+            await interaction.followup.send(file=file, view=view)
+        else:
+            await interaction.followup.send(embed=embed, view=view)
+    except Exception as e:
+        await interaction.followup.send(f"[ERROR] {str(e)}")
+    finally:
+        # FAILSAFE: Always close workbook even if an error occurs
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception as close_err:
+                print(f"[WARNING] Error closing workbook: {close_err}")
+
+
+@bot.tree.command(name="ratio-leaderboard", description="View ratio-based leaderboard")
+@discord.app_commands.describe(metric="Choose which ratio to rank by")
+@discord.app_commands.choices(metric=[
+    discord.app_commands.Choice(name="Win/Loss", value="wl_ratio"),
+    discord.app_commands.Choice(name="Kill/Death", value="kd_ratio"),
+    discord.app_commands.Choice(name="Kill/Game", value="kills_per_game"),
+    discord.app_commands.Choice(name="Kill/Win", value="kills_per_win"),
+    discord.app_commands.Choice(name="Damage/Game", value="damage_per_game"),
+    discord.app_commands.Choice(name="Damage/Sheep", value="damage_per_sheep"),
+    discord.app_commands.Choice(name="Wools/Game", value="wools_per_game"),
+    discord.app_commands.Choice(name="Void Kill/Death", value="void_kd_ratio"),
+    discord.app_commands.Choice(name="Explosive Kill/Death", value="explosive_kd_ratio"),
+    discord.app_commands.Choice(name="Bow Kill/Death", value="bow_kd_ratio"),
+    discord.app_commands.Choice(name="Melee Kill/Death", value="melee_kd_ratio"),
+    discord.app_commands.Choice(name="EXP/Hour", value="exp_per_hour"),
+    discord.app_commands.Choice(name="EXP/Game", value="exp_per_game"),
+])
+async def ratio_leaderboard(interaction: discord.Interaction, metric: discord.app_commands.Choice[str]):
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            return
+    wb = None
+    try:
+        EXCEL_FILE = "stats.xlsx"
+        if not os.path.exists(EXCEL_FILE):
+            await interaction.followup.send("[ERROR] Excel file not found")
+            return
+        # FAILSAFE: Load workbook with guaranteed cleanup
+        wb = load_workbook(EXCEL_FILE, read_only=True, data_only=True)
+        view = RatioLeaderboardView(metric.value, wb)
+        embed, file, _ = view.generate_leaderboard_image("lifetime", 0)
         if file:
             await interaction.followup.send(file=file, view=view)
         else:
