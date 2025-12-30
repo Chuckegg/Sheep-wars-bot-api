@@ -15,6 +15,7 @@ import math
 import requests
 import asyncio
 import time
+from typing import Optional, Union
 try:
     from PIL import Image, ImageDraw, ImageFont
 except Exception:
@@ -909,7 +910,7 @@ def get_prestige_segments(level: int, icon: str) -> list:
     
     return segments
 
-def _safe_guild_tag(guild_tag: str) -> str | None:
+def _safe_guild_tag(guild_tag: str) -> Optional[str]:
     """Try to return guild tag, but return None if it contains problematic unicode."""
     if not guild_tag:
         return None
@@ -1111,7 +1112,7 @@ def create_stats_composite_image(level, icon, ign, tab_name, wins, losses, wl_ra
     margin, spacing = 40, 15
     composite = Image.new('RGBA', (canvas_w, canvas_h), (18, 18, 20, 255))
     
-    formatted_playtime = format_playtime(playtime_seconds)
+    formatted_playtime = format_playtime
     skin_w, skin_h = 240, 285
     header_card_w = (canvas_w - (margin * 2) - skin_w - (spacing * 2)) // 2
     
@@ -2067,7 +2068,7 @@ def is_user_authorized(discord_user_id: int, ign: str) -> bool:
     key = ign.casefold()
     return links.get(key) == str(discord_user_id)
 
-def is_admin(user: discord.User | discord.Member) -> bool:
+def is_admin(user: Union[discord.User, discord.Member]) -> bool:
     """Check if user is a bot admin."""
     if str(user.id) in ADMIN_IDS:
         return True
@@ -2291,7 +2292,7 @@ def remove_default_user(discord_user_id: int) -> bool:
         return True
     return False
 
-def get_default_user(discord_user_id: int) -> str | None:
+def get_default_user(discord_user_id: int) -> Optional[str]:
     defaults = load_default_users()
     return defaults.get(str(discord_user_id))
 
@@ -3260,7 +3261,7 @@ class LeaderboardView(discord.ui.View):
         else:
             return self.get_leaderboard_embed(period, clamped_page, total_pages, leaderboard), None, total_pages
 
-    def get_leaderboard_embed(self, period: str, page: int = 0, total_pages: int = 1, leaderboard: list | None = None):
+    def get_leaderboard_embed(self, period: str, page: int = 0, total_pages: int = 1, leaderboard: Optional[list] = None):
         metric_label, leaderboard_data = self._get_leaderboard(period) if leaderboard is None else (self.metric_labels[self.metric], leaderboard)
 
         if not leaderboard_data:
@@ -3303,7 +3304,7 @@ class LeaderboardView(discord.ui.View):
         embed.set_footer(text=f"Page {clamped_page + 1} of {total_pages}")
         return embed
 
-    async def _refresh(self, interaction: discord.Interaction, *, new_period: str | None = None, page_delta: int = 0):
+    async def _refresh(self, interaction: discord.Interaction, *, new_period: Optional[str] = None, page_delta: int = 0):
         if new_period is not None:
             self.current_period = new_period
             self.page = 0
@@ -3827,7 +3828,7 @@ class RatioLeaderboardView(discord.ui.View):
         else:
             return self.get_leaderboard_embed(period, clamped_page, total_pages, leaderboard), None, total_pages
 
-    def get_leaderboard_embed(self, period: str, page: int = 0, total_pages: int = 1, leaderboard: list | None = None):
+    def get_leaderboard_embed(self, period: str, page: int = 0, total_pages: int = 1, leaderboard: Optional[list] = None):
         metric_label, leaderboard_data = self._get_leaderboard(period) if leaderboard is None else (self.metric_labels[self.metric], leaderboard)
 
         if not leaderboard_data:
@@ -3867,7 +3868,7 @@ class RatioLeaderboardView(discord.ui.View):
         embed.set_footer(text=f"Page {clamped_page + 1} of {total_pages}")
         return embed
 
-    async def _refresh(self, interaction: discord.Interaction, *, new_period: str | None = None, page_delta: int = 0):
+    async def _refresh(self, interaction: discord.Interaction, *, new_period: Optional[str] = None, page_delta: int = 0):
         if new_period is not None:
             self.current_period = new_period
             self.page = 0

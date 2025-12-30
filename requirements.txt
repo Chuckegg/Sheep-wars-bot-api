@@ -26,3 +26,8 @@ urllib3==2.6.2
 yarl==1.22.0
 Pillow>=9.0.0
 python-socketio==5.11.3
+discord.py>=2.0.0
+openpyxl
+requests
+Pillow
+python-socketio
