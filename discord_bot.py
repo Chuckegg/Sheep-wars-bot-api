@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import subprocess
 import sys
+import openpyxl
 from openpyxl import load_workbook
 import os
 import re
@@ -27,6 +28,7 @@ TRACKED_FILE = os.path.join(os.path.dirname(__file__), "tracked_users.txt")
 USER_LINKS_FILE = os.path.join(os.path.dirname(__file__), "user_links.json")
 USER_COLORS_FILE = os.path.join(os.path.dirname(__file__), "user_colors.json")
 DEFAULT_USERS_FILE = os.path.join(os.path.dirname(__file__), "default_users.json")
+TRACKED_STREAKS_FILE = os.path.join(os.path.dirname(__file__), "tracked_streaks.json")
 CREATOR_NAME = "chuckegg"
 # Optionally set a numeric Discord user ID for direct DM (recommended for reliability)
 CREATOR_ID = "542467909549555734"
@@ -225,7 +227,8 @@ class StatsCache:
                     else:
                         ign_color = user_info.get('color', '#FFFFFF')
                         g_tag = user_info.get('guild_tag')
-                        g_hex = MINECRAFT_NAME_TO_HEX.get(str(user_info.get('guild_color', 'GRAY')).upper(), "#AAAAAA")
+                        raw_g = str(user_info.get('guild_color', 'GRAY')).upper()
+                        g_hex = raw_g if raw_g.startswith('#') else MINECRAFT_NAME_TO_HEX.get(raw_g, "#AAAAAA")
 
                     user_cache["meta"] = {"level": level, "icon": get_prestige_icon(level), "ign_color": ign_color, "guild_tag": g_tag, "guild_hex": g_hex, "username": sheet_name}
                     cache[sheet_name] = user_cache
@@ -259,14 +262,30 @@ class StatsCache:
             else:
                 ign_color = user_info.get('color', '#FFFFFF')
                 g_tag = user_info.get('guild_tag')
-                g_hex = MINECRAFT_NAME_TO_HEX.get(str(user_info.get('guild_color', 'GRAY')).upper(), "#AAAAAA")
+                raw_g = str(user_info.get('guild_color', 'GRAY')).upper()
+                g_hex = raw_g if raw_g.startswith('#') else MINECRAFT_NAME_TO_HEX.get(raw_g, "#AAAAAA")
 
             # Update cache
             self.data[username] = {"stats": processed_stats, "meta": {"level": level, "icon": get_prestige_icon(level), "ign_color": ign_color, "guild_tag": g_tag, "guild_hex": g_hex, "username": username}}
+
+            # Update streaks if applicable
+            try:
+                update_streaks_from_stats(username, processed_stats)
+            except Exception as e:
+                print(f"[STREAK] Failed to update streaks for {username}: {e}")
             
             # Update mtime to prevent the next get_data call from reloading
             if self.excel_path.exists():
                 self.last_mtime = self.excel_path.stat().st_mtime
+
+    async def refresh(self):
+        """Force reload of cache from Excel."""
+        async with self.lock:
+            print("[CACHE] Forcing cache refresh...")
+            self.data = await asyncio.to_thread(self._load_from_excel)
+            if self.excel_path.exists():
+                self.last_mtime = self.excel_path.stat().st_mtime
+            print(f"[CACHE] Refresh complete. Cached {len(self.data)} users.")
 
 STATS_CACHE = StatsCache()
 
@@ -388,6 +407,8 @@ def run_script(script_name, args, timeout=30):
         cwd=str(BOT_DIR),
         capture_output=True,
         text=True,
+        encoding='utf-8',
+        errors='replace',
         timeout=timeout
     )
 
@@ -398,8 +419,43 @@ def run_script_batch(script_name, args):
         cwd=str(BOT_DIR),
         capture_output=True,
         text=True,
+        encoding='utf-8',
+        errors='replace',
         timeout=300  # 5 minutes for batch operations
     )
+
+async def ensure_user_cached(ign: str, timeout: int = 60) -> tuple[bool, str]:
+    """
+    Ensure a user's data is cached. If not in cache, fetch it.
+    Returns (success, actual_ign) tuple.
+    """
+    cache_data = await STATS_CACHE.get_data()
+    key = ign.casefold()
+    
+    # Check if already cached
+    for name, data in cache_data.items():
+        if name.casefold() == key:
+            return True, name
+    
+    # Not cached, fetch it
+    print(f"[CACHE] User {ign} not in cache, fetching now...")
+    try:
+        result = await asyncio.to_thread(run_script, "api_get.py", ["-ign", ign], timeout=timeout)
+        if result.returncode != 0:
+            print(f"[CACHE] Failed to fetch {ign}: {result.stderr}")
+            return False, ign
+        
+        # Verify it's now cached
+        cache_data = await STATS_CACHE.get_data()
+        for name, data in cache_data.items():
+            if name.casefold() == key:
+                return True, name
+        
+        print(f"[CACHE] Fetched {ign} but still not in cache")
+        return False, ign
+    except Exception as e:
+        print(f"[CACHE] Exception fetching {ign}: {e}")
+        return False, ign
 
 # additional imports for background tasks
 import asyncio
@@ -853,8 +909,20 @@ def get_prestige_segments(level: int, icon: str) -> list:
     
     return segments
 
-def render_prestige_with_text(level: int, icon: str, ign: str, suffix: str = "", ign_color: str = None, 
-                              guild_tag: str = None, guild_color: str = None, two_line: bool = False) -> io.BytesIO:
+def _safe_guild_tag(guild_tag: str) -> str | None:
+    """Try to return guild tag, but return None if it contains problematic unicode."""
+    if not guild_tag:
+        return None
+    # Only allow ASCII characters to prevent rendering issues
+    try:
+        guild_tag.encode('ascii')
+        return guild_tag
+    except UnicodeEncodeError:
+        # Filter out non-ASCII
+        cleaned = "".join(c for c in guild_tag if ord(c) < 128)
+        return cleaned if cleaned else None
+
+def render_prestige_with_text(level: int, icon: str, ign: str, suffix: str, ign_color: str = None, guild_tag: str = None, guild_color: str = None, two_line: bool = False) -> io.BytesIO:
     """Render a prestige prefix with IGN, optional guild tag, and optional suffix text.
     
     Returns a BytesIO containing the rendered PNG image.
@@ -873,12 +941,16 @@ def render_prestige_with_text(level: int, icon: str, ign: str, suffix: str = "",
     ign_hex = ign_color if ign_color else MINECRAFT_CODE_TO_HEX.get('f', '#FFFFFF')
     segments.append((ign_hex, f" {ign}"))
     
-    # Add guild tag if provided
-    if guild_tag and guild_color:
-        guild_hex = MINECRAFT_NAME_TO_HEX.get(guild_color.upper(), '#FFFFFF')
-        segments.append((guild_hex, f" [{guild_tag}]"))
-    elif guild_tag:
-        segments.append((MINECRAFT_CODE_TO_HEX.get('f', '#FFFFFF'), f" [{guild_tag}]"))
+    # Add guild tag if provided (with safety check)
+    safe_tag = _safe_guild_tag(guild_tag)
+    if safe_tag and guild_color:
+        if guild_color.startswith('#'):
+            guild_hex = guild_color
+        else:
+            guild_hex = MINECRAFT_NAME_TO_HEX.get(guild_color.upper(), '#FFFFFF')
+        segments.append((guild_hex, f" [{safe_tag}]"))
+    elif safe_tag:
+        segments.append((MINECRAFT_CODE_TO_HEX.get('f', '#FFFFFF'), f" [{safe_tag}]"))
     
     if two_line and suffix:
         # Two-line format: first line ends after guild tag, second line is the suffix
@@ -1034,7 +1106,7 @@ def render_stat_box(label: str, value: str, width: int = 200, height: int = 80):
 
 def create_stats_composite_image(level, icon, ign, tab_name, wins, losses, wl_ratio, kills, deaths, kd_ratio, 
                                   ign_color=None, guild_tag=None, guild_hex=None, playtime_seconds=0,
-                                  status_text="Online", status_color=(85, 255, 85)):
+                                  status_text="Online", status_color=(85, 255, 85), skin_image=None):
     canvas_w, canvas_h = 1200, 650
     margin, spacing = 40, 15
     composite = Image.new('RGBA', (canvas_w, canvas_h), (18, 18, 20, 255))
@@ -1045,7 +1117,10 @@ def create_stats_composite_image(level, icon, ign, tab_name, wins, losses, wl_ra
     
     skin_card = Image.new('RGBA', (skin_w, skin_h), (0, 0, 0, 0))
     ImageDraw.Draw(skin_card).rounded_rectangle([0, 0, skin_w, skin_h], radius=15, fill=(35, 30, 45, 240))
-    skin = get_player_body(ign)
+    if skin_image:
+        skin = skin_image
+    else:
+        skin = get_player_body(ign)
     if skin:
         skin.thumbnail((220, 260), Image.Resampling.LANCZOS)
         skin_card.paste(skin, ((skin_w - skin.width)//2, (skin_h - skin.height)//2), skin)
@@ -1126,8 +1201,7 @@ def create_full_stats_image(ign: str, tab_name: str, level: int, icon: str, stat
     """Render the full stats layout defined in Template.xlsx.
 
     Layout rules:
-    - First 2 lines: 3 boxes each
-    - Third line: 1 box (title)
+    - First line: 5 boxes (Wins/Hour, EXP/Hour, Playtime, EXP/Game, Kills/Hour)
     - Remaining lines: 5 boxes each
     """
     if Image is None:
@@ -1146,15 +1220,17 @@ def create_full_stats_image(ign: str, tab_name: str, level: int, icon: str, stat
     # Build lines from the template-driven order
     lines = [
         [
+            ("Wins/Hour", stats.get("wins_per_hour", "0")),
             ("Exp/Hour", stats.get("exp_per_hour", "0")),
             ("Playtime", stats.get("playtime", "0")),
             ("Exp/Game", stats.get("exp_per_game", "0")),
+            ("Kills/Hour", stats.get("kills_per_hour", "0")),
         ],
         [
             ("Wins", stats.get("wins", "0")),
             ("Losses", stats.get("losses", "0")),
             ("WLR", stats.get("wlr", "0")),
-            ("Layers", stats.get("layers", "0")),
+            ("Damage/Game", stats.get("damage_per_game", "0")),
             ("Coins", stats.get("coins", "0")),
         ],
         [
@@ -1194,17 +1270,13 @@ def create_full_stats_image(ign: str, tab_name: str, level: int, icon: str, stat
         ],
     ]
 
-    # Render all boxes first (playtime wider in middle of first row)
+    # Render all boxes
     rendered_lines = []
     for line_idx, line in enumerate(lines):
         rendered = []
         for col_idx, (label, value) in enumerate(line):
             try:
-                if label.lower() == "playtime":
-                    # Playtime box is wider (middle box in row 0)
-                    rendered.append(render_stat_box(label, str(value), width=280, height=box_height))
-                else:
-                    rendered.append(render_stat_box(label, str(value), width=box_width, height=box_height))
+                rendered.append(render_stat_box(label, str(value), width=box_width, height=box_height))
             except Exception as e:
                 print(f"[WARNING] Failed to render box {label}: {e}")
         rendered_lines.append(rendered)
@@ -1214,7 +1286,7 @@ def create_full_stats_image(ign: str, tab_name: str, level: int, icon: str, stat
     line_widths = []
     for line in rendered_lines:
         line_height = box_height
-        # Calculate width accounting for playtime being wider
+        # Calculate width
         line_width = 0
         for i, box in enumerate(line):
             line_width += box.width
@@ -1269,6 +1341,57 @@ def create_full_stats_image(ign: str, tab_name: str, level: int, icon: str, stat
     out.seek(0)
     return out
 
+
+
+def create_streaks_image(ign: str, level: int, icon: str, ign_color: str, guild_tag: str, guild_color: str, winstreak: int, killstreak: int) -> io.BytesIO:
+    if Image is None:
+        raise RuntimeError("Pillow not available")
+
+    title_io = render_prestige_with_text(level, icon, ign, "", ign_color, guild_tag, guild_color, two_line=False)
+    title_img = Image.open(title_io)
+
+    box_width = 300
+    box_height = 120
+    spacing = 20
+
+    boxes = [
+        render_stat_box("Current Winstreak", f"{int(winstreak):,}", width=box_width, height=box_height),
+        render_stat_box("Current Killstreak", f"{int(killstreak):,}", width=box_width, height=box_height),
+    ]
+
+    line_width = boxes[0].width + boxes[1].width + spacing
+    grid_height = box_height
+    margin_x = 40
+    margin_y = 40
+
+    title_width = title_img.width
+    title_height = title_img.height
+    content_width = max(title_width, line_width)
+
+    composite_width = content_width + margin_x * 2
+    composite_height = title_height + spacing + grid_height + margin_y * 2
+
+    composite = Image.new('RGBA', (composite_width, composite_height), (18, 18, 20, 255))
+    composite.paste(title_img, ((composite_width - title_width) // 2, margin_y), title_img if title_img.mode == 'RGBA' else None)
+
+    y_offset = margin_y + title_height + spacing
+    x_start = (composite_width - line_width) // 2
+    x = x_start
+    for box in boxes:
+        composite.paste(box, (x, y_offset), box)
+        x += box.width + spacing
+
+    draw = ImageDraw.Draw(composite)
+    footer_text = "Made with ❤ by chuckegg & felix"
+    font_footer = _load_font("DejaVuSans.ttf", 14)
+    bbox = draw.textbbox((0, 0), footer_text, font=font_footer)
+    text_w = bbox[2] - bbox[0]
+    draw.text(((composite_width - text_w) // 2, composite_height - 30), footer_text, font=font_footer, fill=(60, 60, 65))
+
+    out = io.BytesIO()
+    composite.save(out, format='PNG')
+    out.seek(0)
+    return out
 
 
 
@@ -1595,7 +1718,7 @@ def render_prestige_range_image(base: int, end_display: int) -> io.BytesIO:
 
     combined = []
     combined.extend(start_segments)
-    combined.append((MINECRAFT_CODE_TO_HEX.get('7', '#AAAAAA'), ' ➜ '))
+    combined.append((MINECRAFT_CODE_TO_HEX.get('7', '#AAAAAA'), ' -> '))
     combined.extend(end_segments)
 
     return _render_text_segments_to_image(combined)
@@ -1808,6 +1931,113 @@ def add_tracked_user(ign: str) -> bool:
     with open(TRACKED_FILE, "a", encoding="utf-8") as f:
         f.write(ign + "\n")
     return True
+
+
+def load_tracked_streaks() -> dict:
+    if not os.path.exists(TRACKED_STREAKS_FILE):
+        return {}
+    try:
+        with open(TRACKED_STREAKS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_tracked_streaks(data: dict):
+    try:
+        with open(TRACKED_STREAKS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"[STREAK] Failed to save streaks file: {e}")
+
+
+def load_user_colors() -> dict:
+    """Load user colors and metadata from user_colors.json"""
+    if not os.path.exists(USER_COLORS_FILE):
+        return {}
+    try:
+        with open(USER_COLORS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def _get_lifetime_value(stats: dict, key: str) -> int:
+    try:
+        return int(stats.get(key, {}).get("lifetime", 0))
+    except Exception:
+        return 0
+
+
+def update_streaks_from_stats(username: str, processed_stats: dict) -> bool:
+    streaks = load_tracked_streaks()
+    entry = streaks.get(username)
+    if not entry:
+        return False
+
+    wins = _get_lifetime_value(processed_stats, "wins")
+    losses = _get_lifetime_value(processed_stats, "losses")
+    kills = _get_lifetime_value(processed_stats, "kills")
+    deaths = _get_lifetime_value(processed_stats, "deaths")
+
+    last_wins = int(entry.get("last_wins", wins))
+    last_losses = int(entry.get("last_losses", losses))
+    last_kills = int(entry.get("last_kills", kills))
+    last_deaths = int(entry.get("last_deaths", deaths))
+
+    winstreak = int(entry.get("winstreak", 0))
+    killstreak = int(entry.get("killstreak", 0))
+
+    win_delta = wins - last_wins
+    loss_delta = losses - last_losses
+    kill_delta = kills - last_kills
+    death_delta = deaths - last_deaths
+
+    if loss_delta > 0:
+        winstreak = 0
+    elif win_delta > 0 and loss_delta <= 0:
+        winstreak = max(0, winstreak) + win_delta
+
+    if death_delta > 0:
+        killstreak = 0
+    elif kill_delta > 0 and death_delta <= 0:
+        killstreak = max(0, killstreak) + kill_delta
+
+    entry.update({
+        "winstreak": winstreak,
+        "killstreak": killstreak,
+        "last_wins": wins,
+        "last_losses": losses,
+        "last_kills": kills,
+        "last_deaths": deaths,
+    })
+    streaks[username] = entry
+    save_tracked_streaks(streaks)
+    return True
+
+
+def initialize_streak_entry(username: str, processed_stats: dict):
+    streaks = load_tracked_streaks()
+    wins = _get_lifetime_value(processed_stats, "wins")
+    losses = _get_lifetime_value(processed_stats, "losses")
+    kills = _get_lifetime_value(processed_stats, "kills")
+    deaths = _get_lifetime_value(processed_stats, "deaths")
+
+    streaks[username] = {
+        "winstreak": 0,
+        "killstreak": 0,
+        "last_wins": wins,
+        "last_losses": losses,
+        "last_kills": kills,
+        "last_deaths": deaths,
+    }
+    save_tracked_streaks(streaks)
 
 def load_user_links():
     """Load username -> Discord user ID mappings from JSON file"""
@@ -2153,7 +2383,24 @@ async def _delayed_refresh_user(username: str, delay: float):
     """Sleep for `delay` seconds then run api_get.py for the given username."""
     try:
         await asyncio.sleep(delay)
-        await asyncio.to_thread(run_script, "api_get.py", ["-ign", username])
+        result = await asyncio.to_thread(run_script, "api_get.py", ["-ign", username])
+
+        # Try to update cache/streaks from stdout JSON
+        if result and result.stdout:
+            try:
+                json_data = None
+                for line in reversed(result.stdout.splitlines()):
+                    line = line.strip()
+                    if line.startswith('{') and line.endswith('}'):
+                        try:
+                            json_data = json.loads(line)
+                            break
+                        except json.JSONDecodeError:
+                            continue
+                if json_data and "processed_stats" in json_data and "username" in json_data:
+                    await STATS_CACHE.update_cache_entry(json_data["username"], json_data["processed_stats"])
+            except Exception as parse_err:
+                print(f"[REFRESH] Failed to parse refresh output for {username}: {parse_err}")
     except asyncio.CancelledError:
         return
     except Exception as e:
@@ -2446,7 +2693,11 @@ async def scheduler_loop():
                     
                     yesterday_result = await asyncio.to_thread(run_yesterday)
                     if yesterday_result.returncode != 0:
-                        await send_fetch_message(f"Warning: Yesterday snapshot failed at {now.strftime('%I:%M %p')}")
+                        error_detail = yesterday_result.stderr or yesterday_result.stdout or "Unknown error"
+                        print(f"[SCHEDULER] Yesterday snapshot FAILED - returncode: {yesterday_result.returncode}")
+                        print(f"[SCHEDULER] Full stdout:\n{yesterday_result.stdout}")
+                        print(f"[SCHEDULER] Full stderr:\n{yesterday_result.stderr}")
+                        await send_fetch_message(f"Warning: Yesterday snapshot failed at {now.strftime('%I:%M %p')}\nError: {error_detail[:500]}")
                     
                     # Step 2: Determine which snapshots to take
                     # Daily: always
@@ -2468,8 +2719,14 @@ async def scheduler_loop():
                         await send_fetch_message(msg)
                     else:
                         error_msg = result.stderr or result.stdout or "Unknown error"
-                        await send_fetch_message(f"Daily snapshot failed: {error_msg[:200]}")
+                        print(f"[SCHEDULER] Daily snapshot FAILED - returncode: {result.returncode}")
+                        print(f"[SCHEDULER] Full stdout:\n{result.stdout}")
+                        print(f"[SCHEDULER] Full stderr:\n{result.stderr}")
+                        await send_fetch_message(f"Daily snapshot failed: {error_msg[:500]}")
                 except Exception as e:
+                    print(f"[SCHEDULER] Snapshot update exception: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
                     await send_fetch_message(f"Snapshot update error: {str(e)}")
                 
                 last_snapshot_run = today
@@ -2478,7 +2735,7 @@ async def scheduler_loop():
 
 # Helper class for stats tab view
 class StatsTabView(discord.ui.View):
-    def __init__(self, data_dict, ign, level_value: int, prestige_icon: str, status_text="Online", status_color=(85, 255, 85)):
+    def __init__(self, data_dict, ign, level_value: int, prestige_icon: str, status_text="Online", status_color=(85, 255, 85), skin_image=None):
         super().__init__()
         self.data = data_dict 
         self.ign = ign
@@ -2486,6 +2743,7 @@ class StatsTabView(discord.ui.View):
         self.prestige_icon = prestige_icon
         self.status_text = status_text
         self.status_color = status_color
+        self.skin_image = skin_image
         self.current_tab = "all-time"
         self.ign_color = None
         self.guild_tag = None
@@ -2524,7 +2782,8 @@ class StatsTabView(discord.ui.View):
             tab_data['kills'], tab_data['deaths'], tab_data['kdr'],
             self.ign_color, self.guild_tag, self.guild_hex, 
             playtime_seconds=tab_data['playtime'],
-            status_text=self.status_text, status_color=self.status_color
+            status_text=self.status_text, status_color=self.status_color,
+            skin_image=self.skin_image
         )
         return discord.File(img_io, filename=f"{self.ign}_{tab_name}.png")
 
@@ -2627,6 +2886,8 @@ class StatsFullView(discord.ui.View):
         playtime_hours = playtime_seconds / 3600 if playtime_seconds else 0
         exp_per_hour = safe_div(experience, playtime_hours)
         exp_per_game = safe_div(experience, games)
+        wins_per_hour = safe_div(wins, playtime_hours)
+        kills_per_hour = safe_div(kills, playtime_hours)
         kdr = safe_div(kills, deaths) if deaths else kills
         wlr = safe_div(wins, losses) if losses else wins
         kills_per_game = safe_div(kills, games)
@@ -2647,6 +2908,8 @@ class StatsFullView(discord.ui.View):
             "level": fmt_int(self._get_value('level', tab_name)),
             "exp_per_hour": fmt_ratio(exp_per_hour),
             "exp_per_game": fmt_ratio(exp_per_game),
+            "wins_per_hour": fmt_ratio(wins_per_hour),
+            "kills_per_hour": fmt_ratio(kills_per_hour),
             "sheepwars_label": "",
             "wins": fmt_int(wins),
             "losses": fmt_int(losses),
@@ -3091,6 +3354,128 @@ class LeaderboardPeriodSelect(discord.ui.Select):
         await self.view_ref._refresh(interaction, new_period=selected)
 
 
+def _load_leaderboard_data_from_excel(metric: str):
+    """Load leaderboard data directly from Excel file instead of cache.
+    
+    Returns dict with period -> list of (username, value, display_value, is_playtime, level, icon, color, guild_tag, guild_color)
+    """
+    periods = ["lifetime", "session", "daily", "yesterday", "monthly"]
+    result = {p: [] for p in periods}
+    
+    EXCEL_FILE = BOT_DIR / "stats.xlsx"
+    if not EXCEL_FILE.exists():
+        return result
+    
+    try:
+        with FileLock(LOCK_FILE):
+            wb = openpyxl.load_workbook(EXCEL_FILE, data_only=True)
+            
+            for sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                username = sheet_name
+                
+                # Read stats from the Excel sheet
+                stats_dict = {}
+                
+                # Expected header row is row 1
+                headers = {}
+                for col_idx, cell in enumerate(ws[1], 1):
+                    if cell.value:
+                        headers[col_idx] = str(cell.value).lower()
+                
+                # Read data rows (skip header)
+                for row_idx in range(2, ws.max_row + 1):
+                    stat_name = ws.cell(row_idx, 1).value
+                    if not stat_name:
+                        continue
+                    
+                    stat_name = str(stat_name).lower().strip()
+                    
+                    # Extract period values
+                    # Column B = Lifetime, C = Session Delta, D = Daily, E = Yesterday, F = Monthly
+                    stats_dict[stat_name] = {
+                        "lifetime": ws.cell(row_idx, 2).value or 0,
+                        "session": ws.cell(row_idx, 3).value or 0,
+                        "daily": ws.cell(row_idx, 4).value or 0,
+                        "yesterday": ws.cell(row_idx, 5).value or 0,
+                        "monthly": ws.cell(row_idx, 6).value or 0,
+                    }
+                
+                # Load user metadata
+                user_colors = load_user_colors()
+                user_meta = user_colors.get(username.lower(), {})
+                
+                # Try to get level from stats_dict first
+                level = stats_dict.get("level", {}).get("lifetime", 0)
+                if not level:
+                    level = stats_dict.get("prestige level", {}).get("lifetime", 0)
+                if not level:
+                    level = 0
+                else:
+                    level = int(level) if level else 0
+                
+                icon = ""
+                ign_color = user_meta.get("color", "#FFFFFF")
+                guild_tag = user_meta.get("guild_tag")
+                raw_g = str(user_meta.get('guild_color', 'GRAY')).upper()
+                guild_color = raw_g if raw_g.startswith('#') else MINECRAFT_NAME_TO_HEX.get(raw_g, "#AAAAAA")
+                
+                # Process each period
+                for period in periods:
+                    val = 0
+                    
+                    # Map metric names to Excel column patterns
+                    if metric == "kills":
+                        val = stats_dict.get("kills", {}).get(period, 0)
+                    elif metric == "deaths":
+                        val = stats_dict.get("deaths", {}).get(period, 0)
+                    elif metric == "kdr":
+                        k = stats_dict.get("kills", {}).get(period, 0)
+                        d = stats_dict.get("deaths", {}).get(period, 0)
+                        val = k / d if d > 0 else k
+                    elif metric == "wins":
+                        val = stats_dict.get("wins", {}).get(period, 0)
+                    elif metric == "losses":
+                        val = stats_dict.get("losses", {}).get(period, 0)
+                    elif metric == "wlr":
+                        w = stats_dict.get("wins", {}).get(period, 0)
+                        l = stats_dict.get("losses", {}).get(period, 0)
+                        val = w / l if l > 0 else w
+                    elif metric == "experience":
+                        val = stats_dict.get("experience", {}).get(period, 0)
+                    elif metric == "level":
+                        val = stats_dict.get("level", {}).get(period, 0)
+                    elif metric == "coins":
+                        val = stats_dict.get("coins", {}).get(period, 0)
+                    elif metric == "damage_dealt":
+                        val = stats_dict.get("damage dealt", {}).get(period, 0)
+                    elif metric == "games_played":
+                        val = stats_dict.get("games played", {}).get(period, 0)
+                    elif metric == "sheep_thrown":
+                        val = stats_dict.get("sheep thrown", {}).get(period, 0)
+                    elif metric == "magic_wool_hit":
+                        val = stats_dict.get("magic wool hit", {}).get(period, 0)
+                    elif metric == "playtime":
+                        val = stats_dict.get("playtime", {}).get(period, 0)
+                    else:
+                        val = stats_dict.get(metric, {}).get(period, 0)
+                    
+                    is_playtime = (metric == "playtime")
+                    result[period].append((
+                        username, float(val), val, is_playtime, level, icon, ign_color, guild_tag, guild_color
+                    ))
+            
+            wb.close()
+            
+            # Sort each period by value descending
+            for p in result:
+                result[p].sort(key=lambda x: x[1], reverse=True)
+            
+            return result
+    except Exception as e:
+        print(f"[LEADERBOARD] Error loading from Excel: {e}")
+        return result
+
 def _process_leaderboard_data(cache_data, metric):
     periods = ["lifetime", "session", "daily", "yesterday", "monthly"]
     result = {p: [] for p in periods}
@@ -3121,6 +3506,155 @@ def _process_leaderboard_data(cache_data, metric):
     for p in result:
         result[p].sort(key=lambda x: x[1], reverse=True)
     return result
+
+def _calculate_ratio_value_from_excel(stats_dict: dict, period: str, metric: str):
+    """Calculate ratio values from Excel data."""
+    try:
+        if metric == "wl_ratio":
+            wins = stats_dict.get("wins", {}).get(period, 0)
+            losses = stats_dict.get("losses", {}).get(period, 0)
+            return round(wins / losses, 2) if losses > 0 else wins
+        elif metric == "kd_ratio":
+            kills = stats_dict.get("kills", {}).get(period, 0)
+            deaths = stats_dict.get("deaths", {}).get(period, 0)
+            return round(kills / deaths, 2) if deaths > 0 else kills
+        elif metric == "kills_per_game":
+            kills = stats_dict.get("kills", {}).get(period, 0)
+            games = stats_dict.get("games played", {}).get(period, 0)
+            return round(kills / games, 2) if games > 0 else 0
+        elif metric == "kills_per_win":
+            kills = stats_dict.get("kills", {}).get(period, 0)
+            wins = stats_dict.get("wins", {}).get(period, 0)
+            return round(kills / wins, 2) if wins > 0 else 0
+        elif metric == "damage_per_game":
+            damage = stats_dict.get("damage dealt", {}).get(period, 0)
+            games = stats_dict.get("games played", {}).get(period, 0)
+            return round(damage / games, 2) if games > 0 else 0
+        elif metric == "damage_per_sheep":
+            damage = stats_dict.get("damage dealt", {}).get(period, 0)
+            sheep = stats_dict.get("sheep thrown", {}).get(period, 0)
+            return round(damage / sheep, 2) if sheep > 0 else 0
+        elif metric == "wools_per_game":
+            wools = stats_dict.get("magic wool hit", {}).get(period, 0)
+            games = stats_dict.get("games played", {}).get(period, 0)
+            return round(wools / games, 2) if games > 0 else 0
+        elif metric == "void_kd_ratio":
+            void_kills = stats_dict.get("kills void", {}).get(period, 0)
+            void_deaths = stats_dict.get("deaths void", {}).get(period, 0)
+            return round(void_kills / void_deaths, 2) if void_deaths > 0 else void_kills
+        elif metric == "explosive_kd_ratio":
+            exp_kills = stats_dict.get("kills explosive", {}).get(period, 0)
+            exp_deaths = stats_dict.get("deaths explosive", {}).get(period, 0)
+            return round(exp_kills / exp_deaths, 2) if exp_deaths > 0 else exp_kills
+        elif metric == "bow_kd_ratio":
+            bow_kills = stats_dict.get("kills bow", {}).get(period, 0)
+            bow_deaths = stats_dict.get("deaths bow", {}).get(period, 0)
+            return round(bow_kills / bow_deaths, 2) if bow_deaths > 0 else bow_kills
+        elif metric == "melee_kd_ratio":
+            melee_kills = stats_dict.get("kills melee", {}).get(period, 0)
+            melee_deaths = stats_dict.get("deaths melee", {}).get(period, 0)
+            return round(melee_kills / melee_deaths, 2) if melee_deaths > 0 else melee_kills
+        elif metric == "exp_per_hour":
+            exp = stats_dict.get("experience", {}).get(period, 0)
+            playtime = stats_dict.get("playtime", {}).get(period, 0)
+            hours = playtime / 3600
+            return round(exp / hours, 2) if hours > 0 else 0
+        elif metric == "exp_per_game":
+            exp = stats_dict.get("experience", {}).get(period, 0)
+            games = stats_dict.get("games played", {}).get(period, 0)
+            return round(exp / games, 2) if games > 0 else 0
+        elif metric == "wins_per_hour":
+            wins = stats_dict.get("wins", {}).get(period, 0)
+            playtime = stats_dict.get("playtime", {}).get(period, 0)
+            hours = playtime / 3600
+            return round(wins / hours, 2) if hours > 0 else 0
+        elif metric == "kills_per_hour":
+            kills = stats_dict.get("kills", {}).get(period, 0)
+            playtime = stats_dict.get("playtime", {}).get(period, 0)
+            hours = playtime / 3600
+            return round(kills / hours, 2) if hours > 0 else 0
+        elif metric == "sheeps_per_game":
+            sheep = stats_dict.get("sheep thrown", {}).get(period, 0)
+            games = stats_dict.get("games played", {}).get(period, 0)
+            return round(sheep / games, 2) if games > 0 else 0
+    except:
+        return None
+    return None
+
+def _load_ratio_leaderboard_data_from_excel(metric: str):
+    """Load ratio leaderboard data directly from Excel file."""
+    periods = ["lifetime", "session", "daily", "yesterday", "monthly"]
+    result = {p: [] for p in periods}
+    
+    EXCEL_FILE = BOT_DIR / "stats.xlsx"
+    if not EXCEL_FILE.exists():
+        return result
+    
+    try:
+        with FileLock(LOCK_FILE):
+            wb = openpyxl.load_workbook(EXCEL_FILE, data_only=True)
+            
+            for sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                username = sheet_name
+                
+                # Read stats from the Excel sheet
+                stats_dict = {}
+                
+                # Expected header row is row 1
+                for row_idx in range(2, ws.max_row + 1):
+                    stat_name = ws.cell(row_idx, 1).value
+                    if not stat_name:
+                        continue
+                    
+                    stat_name = str(stat_name).lower().strip()
+                    
+                    # Extract period values
+                    stats_dict[stat_name] = {
+                        "lifetime": ws.cell(row_idx, 2).value or 0,
+                        "session": ws.cell(row_idx, 3).value or 0,
+                        "daily": ws.cell(row_idx, 4).value or 0,
+                        "yesterday": ws.cell(row_idx, 5).value or 0,
+                        "monthly": ws.cell(row_idx, 6).value or 0,
+                    }
+                
+                # Load user metadata
+                user_colors = load_user_colors()
+                user_meta = user_colors.get(username.lower(), {})
+                
+                # Try to get level from stats_dict first
+                level = stats_dict.get("level", {}).get("lifetime", 0)
+                if not level:
+                    level = stats_dict.get("prestige level", {}).get("lifetime", 0)
+                if not level:
+                    level = 0
+                else:
+                    level = int(level) if level else 0
+                
+                icon = ""
+                ign_color = user_meta.get("color", "#FFFFFF")
+                guild_tag = user_meta.get("guild_tag")
+                raw_g = str(user_meta.get('guild_color', 'GRAY')).upper()
+                guild_color = raw_g if raw_g.startswith('#') else MINECRAFT_NAME_TO_HEX.get(raw_g, "#AAAAAA")
+                
+                # Process each period
+                for period in periods:
+                    val = _calculate_ratio_value_from_excel(stats_dict, period, metric)
+                    if val is not None:
+                        result[period].append((
+                            username, float(val), val, level, icon, ign_color, guild_tag, guild_color
+                        ))
+            
+            wb.close()
+            
+            # Sort each period by value descending
+            for p in result:
+                result[p].sort(key=lambda x: x[1], reverse=True)
+            
+            return result
+    except Exception as e:
+        print(f"[LEADERBOARD] Error loading ratio data from Excel: {e}")
+        return result
 
 def _calculate_ratio_value_from_cache(stats, period, metric):
     try:
@@ -3171,12 +3705,26 @@ def _calculate_ratio_value_from_cache(stats, period, metric):
         elif metric == "exp_per_hour":
             exp = stats.get("experience", {}).get(period, 0)
             playtime = stats.get("playtime", {}).get(period, 0)
-            hours = playtime / 60
+            hours = playtime / 3600
             return round(exp / hours, 2) if hours > 0 else 0
         elif metric == "exp_per_game":
             exp = stats.get("experience", {}).get(period, 0)
             games = stats.get("games_played", {}).get(period, 0)
             return round(exp / games, 2) if games > 0 else 0
+        elif metric == "wins_per_hour":
+            wins = stats.get("wins", {}).get(period, 0)
+            playtime = stats.get("playtime", {}).get(period, 0)
+            hours = playtime / 3600
+            return round(wins / hours, 2) if hours > 0 else 0
+        elif metric == "kills_per_hour":
+            kills = stats.get("kills", {}).get(period, 0)
+            playtime = stats.get("playtime", {}).get(period, 0)
+            hours = playtime / 3600
+            return round(kills / hours, 2) if hours > 0 else 0
+        elif metric == "sheeps_per_game":
+            sheep = stats.get("sheep_thrown", {}).get(period, 0)
+            games = stats.get("games_played", {}).get(period, 0)
+            return round(sheep / games, 2) if games > 0 else 0
     except:
         return None
     return None
@@ -3225,13 +3773,16 @@ class RatioLeaderboardView(discord.ui.View):
             "kd_ratio": "K/D Ratio",
             "kills_per_game": "Kills/Game",
             "kills_per_win": "Kills/Win",
+            "kills_per_hour": "Kills/Hour",
             "damage_per_game": "Damage/Game",
             "damage_per_sheep": "Damage/Sheep",
             "wools_per_game": "Wools/Game",
+            "sheeps_per_game": "Sheeps/Game",
             "void_kd_ratio": "Void K/D Ratio",
             "explosive_kd_ratio": "Explosive K/D Ratio",
             "bow_kd_ratio": "Bow K/D Ratio",
             "melee_kd_ratio": "Melee K/D Ratio",
+            "wins_per_hour": "Wins/Hour",
             "exp_per_hour": "EXP/Hour",
             "exp_per_game": "EXP/Game",
         }
@@ -3376,6 +3927,10 @@ intents.presences = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# In-memory pending claim registry so approvals can be handled via slash command even after buttons expire
+PENDING_CLAIMS: dict[int, dict] = {}
+PENDING_STREAKS: dict[int, dict] = {}
+
 # Approval system for claim command
 class ApprovalView(discord.ui.View):
     def __init__(self, ign: str, requester: str, requester_id: int, original_interaction: discord.Interaction):
@@ -3386,18 +3941,134 @@ class ApprovalView(discord.ui.View):
         self.original_interaction = original_interaction
         self.approved = None
         self.done_event = asyncio.Event()
+        self.processed_by_admin_command = False
     
     @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
     async def accept_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.approved = True
+        PENDING_CLAIMS.pop(self.requester_id, None)
         self.done_event.set()
         await interaction.response.edit_message(content=f"You accepted claim for {self.ign}.", view=None)
     
     @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger)
     async def deny_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.approved = False
+        PENDING_CLAIMS.pop(self.requester_id, None)
         self.done_event.set()
         await interaction.response.edit_message(content=f"You denied claim for {self.ign}.", view=None)
+
+
+class StreakApprovalView(discord.ui.View):
+    def __init__(self, ign: str, requester: str, requester_id: int, stats_snapshot: dict):
+        super().__init__(timeout=None)
+        self.ign = ign
+        self.requester = requester
+        self.requester_id = requester_id
+        self.stats_snapshot = stats_snapshot or {}
+        self.approved = None
+        self.done_event = asyncio.Event()
+        self.processed_by_admin_command = False
+
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
+    async def accept_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            initialize_streak_entry(self.ign, self.stats_snapshot)
+            PENDING_STREAKS.pop(self.requester_id, None)
+            self.approved = True
+            self.done_event.set()
+            try:
+                requester_user = interaction.client.get_user(self.requester_id) or await interaction.client.fetch_user(self.requester_id)
+                if requester_user:
+                    await requester_user.send(f"✅ Your streak tracking request for {self.ign} was approved.")
+            except Exception:
+                pass
+            await interaction.response.edit_message(content=f"You approved streak tracking for {self.ign}.", view=None)
+        except Exception as e:
+            await interaction.response.edit_message(content=f"[ERROR] Failed to initialize streaks: {e}", view=None)
+
+    @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger)
+    async def deny_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        PENDING_STREAKS.pop(self.requester_id, None)
+        self.approved = False
+        self.done_event.set()
+        try:
+            requester_user = interaction.client.get_user(self.requester_id) or await interaction.client.fetch_user(self.requester_id)
+            if requester_user:
+                await requester_user.send(f"❌ Your streak tracking request for {self.ign} was denied.")
+        except Exception:
+            pass
+        await interaction.response.edit_message(content=f"You denied streak tracking for {self.ign}.", view=None)
+
+
+class StreakRequestView(discord.ui.View):
+    def __init__(self, ign: str, requester: discord.User, stats_snapshot: dict):
+        super().__init__()
+        self.ign = ign
+        self.requester = requester
+        self.requester_id = requester.id
+        self.stats_snapshot = stats_snapshot or {}
+
+    @discord.ui.button(label="Request tracking", style=discord.ButtonStyle.primary)
+    async def request_tracking(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message("This request button is only for the original requester.", ephemeral=True)
+            return
+
+        if self.requester_id in PENDING_STREAKS:
+            await interaction.response.send_message("You already have a pending streak tracking request.", ephemeral=True)
+            return
+
+        admins = []
+        for admin_id in ADMIN_IDS:
+            try:
+                uid = int(admin_id)
+                user = interaction.client.get_user(uid) or await interaction.client.fetch_user(uid)
+                if user:
+                    admins.append(user)
+            except Exception:
+                pass
+
+        if not admins:
+            await interaction.response.send_message("[ERROR] Cannot reach administrators for approval.", ephemeral=True)
+            return
+
+        view = StreakApprovalView(self.ign, self.requester.name, self.requester_id, self.stats_snapshot)
+        _register_pending_streak(self.requester_id, self.ign, self.stats_snapshot, view)
+
+        sent_count = 0
+        for admin in admins:
+            try:
+                await admin.send(
+                    f"{self.requester.name} ({self.requester_id}) requests streak tracking for {self.ign}.\n"
+                    f"Click Accept/Deny below or run /verification-streak user:{self.requester_id} option: accept/deny.",
+                    view=view,
+                )
+                sent_count += 1
+            except Exception:
+                pass
+
+        if sent_count == 0:
+            _pop_pending_streak(self.requester_id)
+            await interaction.response.send_message(f"[ERROR] Could not send streak approval request to administrators.", ephemeral=True)
+            return
+
+        await interaction.response.send_message("✅ Sent streak tracking request for approval.", ephemeral=True)
+
+
+def _register_pending_claim(user_id: int, ign: str, view: ApprovalView):
+    PENDING_CLAIMS[user_id] = {"ign": ign, "view": view}
+
+
+def _pop_pending_claim(user_id: int):
+    return PENDING_CLAIMS.pop(user_id, None)
+
+
+def _register_pending_streak(user_id: int, ign: str, stats_snapshot: dict, view):
+    PENDING_STREAKS[user_id] = {"ign": ign, "stats": stats_snapshot, "view": view}
+
+
+def _pop_pending_streak(user_id: int):
+    return PENDING_STREAKS.pop(user_id, None)
 
 # Bot token
 # Read from BOT_TOKEN.txt in the same directory
@@ -3424,9 +4095,12 @@ async def on_ready():
         print(f"[ERROR] Failed to sync commands: {e}")
     # start background tasks once
     if not getattr(bot, "background_tasks_started", False):
-        bot.loop.create_task(scheduler_loop())
-        bot.loop.create_task(staggered_stats_refresher(interval_minutes=10))
-        bot.loop.create_task(presence_updater_loop(interval_seconds=5))
+        # Store task references for graceful shutdown
+        bot.background_tasks = [
+            bot.loop.create_task(scheduler_loop()),
+            bot.loop.create_task(staggered_stats_refresher(interval_minutes=10)),
+            bot.loop.create_task(presence_updater_loop(interval_seconds=5))
+        ]
         bot.background_tasks_started = True
         print(f"[OK] Background tasks started - Instance ID: {bot_instance_id}")
 
@@ -3540,40 +4214,65 @@ async def claim(interaction: discord.Interaction, ign: str):
                 await interaction.followup.send(f"[ERROR] {ign} is already claimed by another user.")
             return
         
-        # Get creator user
-        creator = None
-        if CREATOR_ID is not None:
+        # Get admin users
+        admins = []
+        for admin_id in ADMIN_IDS:
             try:
-                uid = int(CREATOR_ID)
-                creator = bot.get_user(uid) or await bot.fetch_user(uid)
+                uid = int(admin_id)
+                user = bot.get_user(uid) or await bot.fetch_user(uid)
+                if user:
+                    admins.append(user)
             except Exception:
                 pass
         
-        if creator is None:
-            await interaction.followup.send("[ERROR] Cannot reach creator for approval. Contact administrator.")
+        if not admins:
+            await interaction.followup.send("[ERROR] Cannot reach administrators for approval.")
             return
         
         # Send waiting message to requester
         requester_name = interaction.user.name
-        await interaction.followup.send(f"Asked Chuckegg for approval to claim {ign}. Please wait for confirmation.")
+        await interaction.followup.send(f"Asked administrators for approval to claim {ign}. Please wait for confirmation.")
         
-        # Create approval view and send to creator
+        # Create approval view and send to admins
         view = ApprovalView(ign, requester_name, interaction.user.id, interaction)
-        try:
-            await creator.send(f"{requester_name} wants to claim {ign}.", view=view)
-        except Exception as e:
-            await interaction.followup.send(f"[ERROR] Could not send approval request to creator: {str(e)}")
+        _register_pending_claim(interaction.user.id, ign, view)
+        
+        sent_count = 0
+        for admin in admins:
+            try:
+                await admin.send(
+                    f"{requester_name} ({interaction.user.id}) wants to claim {ign}.\n"
+                    f"Click Accept/Deny below or run /verification user:{interaction.user.id} option: accept/deny.",
+                    view=view,
+                )
+                sent_count += 1
+            except Exception:
+                pass
+        
+        if sent_count == 0:
+            _pop_pending_claim(interaction.user.id)
+            await interaction.followup.send(f"[ERROR] Could not send approval request to administrators.")
             return
         
         # Wait for approval (no timeout)
         await view.done_event.wait()
         
         # Process based on approval
+        if getattr(view, "processed_by_admin_command", False):
+            # Manual /verification already handled linking/notification
+            if view.approved:
+                await interaction.followup.send(f"Chuckegg has approved your claim. {ign} is now linked to your Discord account.")
+            else:
+                await interaction.followup.send(f"Chuckegg has denied your claim for {ign}.")
+            return
+
+        _pop_pending_claim(interaction.user.id)
+
         if view.approved:
             link_user_to_ign(interaction.user.id, ign)
-            await interaction.followup.send(f"Chuckegg has approved your claim. {ign} is now linked to your Discord account.")
+            await interaction.followup.send(f"An administrator has approved your claim. {ign} is now linked to your Discord account.")
         else:
-            await interaction.followup.send(f"Chuckegg has denied your claim for {ign}.")
+            await interaction.followup.send(f"An administrator has denied your claim for {ign}.")
             
     except Exception as e:
         await interaction.followup.send(f"[ERROR] {str(e)}")
@@ -3603,6 +4302,131 @@ async def unclaim(interaction: discord.Interaction, ign: str):
             
     except Exception as e:
         await interaction.followup.send(f"[ERROR] Failed to unclaim: {str(e)}")
+
+
+@bot.tree.command(name="verification", description="Manually approve or deny a claim (admin only)")
+@discord.app_commands.describe(option="Accept or deny the claim", user="Discord user ID of the requester")
+@discord.app_commands.choices(option=[
+    discord.app_commands.Choice(name="Accept", value="accept"),
+    discord.app_commands.Choice(name="Deny", value="deny"),
+])
+async def verification(interaction: discord.Interaction, option: discord.app_commands.Choice[str], user: str):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ This command is only available to bot administrators.", ephemeral=True)
+        return
+
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            return
+
+    try:
+        user_id = int(user)
+    except ValueError:
+        await interaction.followup.send("[ERROR] Invalid user ID.", ephemeral=True)
+        return
+
+    pending = _pop_pending_claim(user_id)
+    if not pending:
+        await interaction.followup.send("[ERROR] No pending claim found for that user.", ephemeral=True)
+        return
+
+    ign = pending.get("ign")
+    view = pending.get("view")
+    approved = option.value == "accept"
+
+    # If we have the original view, mark it and unblock the waiting task
+    if view:
+        view.approved = approved
+        view.processed_by_admin_command = True
+        view.done_event.set()
+
+    requester_user = None
+    try:
+        requester_user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+    except Exception:
+        requester_user = None
+
+    if approved:
+        link_user_to_ign(user_id, ign)
+        if requester_user:
+            try:
+                await requester_user.send(f"✅ Your claim for {ign} was approved by an admin.")
+            except Exception:
+                pass
+        await interaction.followup.send(f"Approved claim: {ign} linked to <@{user_id}>.", ephemeral=True)
+    else:
+        if requester_user:
+            try:
+                await requester_user.send(f"❌ Your claim for {ign} was denied by an admin.")
+            except Exception:
+                pass
+        await interaction.followup.send(f"Denied claim for {ign} (requester <@{user_id}>).", ephemeral=True)
+
+
+@bot.tree.command(name="verification-streak", description="Approve or deny a streak tracking request (admin only)")
+@discord.app_commands.describe(option="Accept or deny the streak request", user="Discord user ID of the requester")
+@discord.app_commands.choices(option=[
+    discord.app_commands.Choice(name="Accept", value="accept"),
+    discord.app_commands.Choice(name="Deny", value="deny"),
+])
+async def verification_streak(interaction: discord.Interaction, option: discord.app_commands.Choice[str], user: str):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ This command is only available to bot administrators.", ephemeral=True)
+        return
+
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            return
+
+    try:
+        user_id = int(user)
+    except ValueError:
+        await interaction.followup.send("[ERROR] Invalid user ID.", ephemeral=True)
+        return
+
+    pending = _pop_pending_streak(user_id)
+    if not pending:
+        await interaction.followup.send("[ERROR] No pending streak request found for that user.", ephemeral=True)
+        return
+
+    ign = pending.get("ign")
+    stats_snapshot = pending.get("stats", {})
+    view = pending.get("view")
+    approved = option.value == "accept"
+
+    requester_user = None
+    try:
+        requester_user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+    except Exception:
+        requester_user = None
+
+    if approved:
+        initialize_streak_entry(ign, stats_snapshot)
+        if view:
+            view.approved = True
+            view.processed_by_admin_command = True
+            view.done_event.set()
+        if requester_user:
+            try:
+                await requester_user.send(f"✅ Your streak tracking request for {ign} was approved by an admin.")
+            except Exception:
+                pass
+        await interaction.followup.send(f"Approved streak tracking for {ign} (requester <@{user_id}>).", ephemeral=True)
+    else:
+        if view:
+            view.approved = False
+            view.processed_by_admin_command = True
+            view.done_event.set()
+        if requester_user:
+            try:
+                await requester_user.send(f"❌ Your streak tracking request for {ign} was denied by an admin.")
+            except Exception:
+                pass
+        await interaction.followup.send(f"Denied streak tracking for {ign} (requester <@{user_id}>).", ephemeral=True)
 
 @bot.tree.command(name="untrack", description="Remove all tracking data for a Minecraft username")
 @discord.app_commands.describe(ign="Minecraft IGN to untrack")
@@ -4074,7 +4898,8 @@ async def refresh(interaction: discord.Interaction, mode: discord.app_commands.C
     if not interaction.response.is_done():
         try:
             await interaction.response.defer(ephemeral=True)
-        except (discord.errors.NotFound, discord.errors.HTTPException):
+        except (discord.errors.NotFound, discord.errors.HTTPException) as e:
+            print(f"[REFRESH] Failed to defer interaction: {e}")
             return
     try:
         # If an IGN was supplied, run per-user api_get.py with appropriate flags
@@ -4105,6 +4930,9 @@ async def refresh(interaction: discord.Interaction, mode: discord.app_commands.C
                 msg = f"Refresh completed for {ign} (schedule: {mode.name})"
             else:
                 error_msg = result.stderr or result.stdout or "Unknown error"
+                print(f"[REFRESH] Single-user refresh FAILED for {ign} - returncode: {result.returncode}")
+                print(f"[REFRESH] stdout: {result.stdout[:500] if result.stdout else '(empty)'}")
+                print(f"[REFRESH] stderr: {result.stderr[:500] if result.stderr else '(empty)'}")
                 msg = f"Refresh failed for {ign}: {error_msg[:300]}"
         else:
             # Run batch_update.py with selected schedule (use extended timeout)
@@ -4117,19 +4945,40 @@ async def refresh(interaction: discord.Interaction, mode: discord.app_commands.C
                 msg = f"Batch snapshot update completed for schedule: {mode.name}"
             else:
                 error_msg = result.stderr or result.stdout or "Unknown error"
-                msg = f"Batch update failed: {error_msg[:300]}"
+                print(f"[REFRESH] Batch update FAILED for schedule {mode.value} - returncode: {result.returncode}")
+                print(f"[REFRESH] Full stdout:")
+                print(result.stdout if result.stdout else "(empty)")
+                print(f"[REFRESH] Full stderr:")
+                print(result.stderr if result.stderr else "(empty)")
+                msg = f"Batch update failed: {error_msg[:800]}"
         
         # Try to DM the invoking user directly
         try:
             await interaction.user.send(msg)
-            await interaction.followup.send("Sent you a DM with the results.", ephemeral=True)
-        except Exception:
+            try:
+                await interaction.followup.send("Sent you a DM with the results.", ephemeral=True)
+            except (discord.errors.NotFound, discord.errors.HTTPException):
+                print(f"[REFRESH] Interaction expired, but DM was sent to {interaction.user.name}")
+        except Exception as dm_error:
             # Fallback to ephemeral if DMs are closed
-            await interaction.followup.send(msg, ephemeral=True)
+            print(f"[REFRESH] Failed to send DM: {dm_error}")
+            try:
+                await interaction.followup.send(msg, ephemeral=True)
+            except (discord.errors.NotFound, discord.errors.HTTPException):
+                print(f"[REFRESH] Interaction expired, couldn't send results to {interaction.user.name}")
     except subprocess.TimeoutExpired:
-        await interaction.followup.send(f"[ERROR] Batch update timed out after 5 minutes. Try a smaller schedule (e.g., just 'daily' or 'session').", ephemeral=True)
+        try:
+            await interaction.followup.send(f"[ERROR] Batch update timed out after 5 minutes. Try a smaller schedule (e.g., just 'daily' or 'session').", ephemeral=True)
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            print(f"[REFRESH] Timeout error but interaction expired")
     except Exception as e:
-        await interaction.followup.send(f"[ERROR] {str(e)}", ephemeral=True)
+        print(f"[REFRESH] Exception: {e}")
+        import traceback
+        traceback.print_exc()
+        try:
+            await interaction.followup.send(f"[ERROR] {str(e)}", ephemeral=True)
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            print(f"[REFRESH] Exception but interaction expired")
 
 
 @bot.tree.command(name="stats", description="Get full player stats (Template.xlsx layout) with deltas")
@@ -4238,6 +5087,98 @@ async def stats(interaction: discord.Interaction, ign: str = None):
 
     except subprocess.TimeoutExpired:
         await interaction.followup.send("[ERROR] Command timed out (30s limit)")
+    except Exception as e:
+        await interaction.followup.send(f"[ERROR] {str(e)}")
+
+
+@bot.tree.command(name="streak", description="View current win/kill streaks (approved users)")
+@discord.app_commands.describe(ign="Minecraft IGN (optional if you set /default)")
+async def streak(interaction: discord.Interaction, ign: str = None):
+    if ign is None or str(ign).strip() == "":
+        default_ign = get_default_user(interaction.user.id)
+        if not default_ign:
+            await interaction.response.send_message("You don't have a default username set. Use /default to set one.", ephemeral=True)
+            return
+        ign = default_ign
+
+    ok, proper_ign = validate_and_normalize_ign(ign)
+    if not ok:
+        await interaction.response.send_message(f"The username {ign} is invalid.", ephemeral=True)
+        return
+    ign = proper_ign
+
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            return
+
+    try:
+        # Ensure user is cached (fetches if needed)
+        cached, actual_ign = await ensure_user_cached(ign)
+        if not cached:
+            await interaction.followup.send(f"[ERROR] Could not find or fetch data for {ign}")
+            return
+
+        cache_data = await STATS_CACHE.get_data()
+        key = actual_ign.casefold()
+        user_data = None
+        for name, data in cache_data.items():
+            if name.casefold() == key:
+                user_data = data
+                actual_ign = name
+                break
+
+        if not user_data:
+            await interaction.followup.send(f"[ERROR] Player sheet '{actual_ign}' not found")
+            return
+
+        # Require user to be tracked in the main tracked list
+        tracked_users = load_tracked_users()
+        if not any(u.casefold() == actual_ign.casefold() for u in tracked_users):
+            await interaction.followup.send(f"{actual_ign} is not currently tracked. Use `/track ign:{actual_ign}` first.")
+            return
+
+        streaks = load_tracked_streaks()
+        entry_key = None
+        for k in streaks.keys():
+            if k.casefold() == actual_ign.casefold():
+                entry_key = k
+                break
+
+        if entry_key:
+            entry = streaks.get(entry_key, {})
+            winstreak = int(entry.get("winstreak", 0))
+            killstreak = int(entry.get("killstreak", 0))
+
+            meta = user_data.get("meta", {})
+            level = meta.get("level", 0)
+            icon = meta.get("icon", "")
+            ign_color = meta.get("ign_color")
+            guild_tag = meta.get("guild_tag")
+            guild_color = meta.get("guild_hex")
+
+            if Image is not None:
+                try:
+                    img_io = create_streaks_image(actual_ign, level, icon, ign_color, guild_tag, guild_color, winstreak, killstreak)
+                    filename = f"{actual_ign}_streaks.png"
+                    await interaction.followup.send(file=discord.File(img_io, filename=filename))
+                    return
+                except Exception as e:
+                    print(f"[STREAK] Failed to render streaks image: {e}")
+
+            embed = discord.Embed(title=f"{actual_ign} Streaks")
+            embed.add_field(name="Current Winstreak", value=f"```{winstreak}```", inline=True)
+            embed.add_field(name="Current Killstreak", value=f"```{killstreak}```", inline=True)
+            await interaction.followup.send(embed=embed)
+        else:
+            message = (
+                f"{actual_ign} does not have streaks tracked. "
+                f"Click the button to request to track {actual_ign}'s streaks."
+            )
+            view = StreakRequestView(actual_ign, interaction.user, user_data.get("stats", {}))
+            await interaction.followup.send(content=message, view=view)
+
     except Exception as e:
         await interaction.followup.send(f"[ERROR] {str(e)}")
 
@@ -4486,9 +5427,12 @@ async def sheepwars(interaction: discord.Interaction, ign: str = None):
     icon = meta.get("icon", "")
     
     # Get real-time status
-    status_text, status_color = get_player_status(ign)
+    # Parallelize status and skin fetching to reduce load time
+    status_task = asyncio.to_thread(get_player_status, ign)
+    skin_task = asyncio.to_thread(get_player_body, ign)
+    (status_text, status_color), skin_image = await asyncio.gather(status_task, skin_task)
     
-    view = StatsTabView(all_data, ign, int(level), icon, status_text=status_text, status_color=status_color)
+    view = StatsTabView(all_data, ign, int(level), icon, status_text=status_text, status_color=status_color, skin_image=skin_image)
     
     # Check if tracked to determine response
     is_tracked = any(u.casefold() == ign.casefold() for u in tracked_users)
@@ -4533,8 +5477,8 @@ async def leaderboard(interaction: discord.Interaction, metric: discord.app_comm
             await interaction.followup.send("[ERROR] Excel file not found")
             return
         
-        cache_data = await STATS_CACHE.get_data()
-        processed_data = _process_leaderboard_data(cache_data, metric.value)
+        # Load data directly from Excel instead of cache
+        processed_data = await asyncio.to_thread(_load_leaderboard_data_from_excel, metric.value)
         view = LeaderboardView(metric.value, processed_data)
         embed, file, _ = await asyncio.to_thread(view.generate_leaderboard_image, "lifetime", 0)
         if file:
@@ -4567,8 +5511,8 @@ async def kill_leaderboard(interaction: discord.Interaction, metric: discord.app
             await interaction.followup.send("[ERROR] Excel file not found")
             return
         
-        cache_data = await STATS_CACHE.get_data()
-        processed_data = _process_leaderboard_data(cache_data, metric.value)
+        # Load data directly from Excel instead of cache
+        processed_data = await asyncio.to_thread(_load_leaderboard_data_from_excel, metric.value)
         view = LeaderboardView(metric.value, processed_data)
         embed, file, _ = await asyncio.to_thread(view.generate_leaderboard_image, "lifetime", 0)
         if file:
@@ -4601,8 +5545,8 @@ async def death_leaderboard(interaction: discord.Interaction, metric: discord.ap
             await interaction.followup.send("[ERROR] Excel file not found")
             return
         
-        cache_data = await STATS_CACHE.get_data()
-        processed_data = _process_leaderboard_data(cache_data, metric.value)
+        # Load data directly from Excel instead of cache
+        processed_data = await asyncio.to_thread(_load_leaderboard_data_from_excel, metric.value)
         view = LeaderboardView(metric.value, processed_data)
         embed, file, _ = await asyncio.to_thread(view.generate_leaderboard_image, "lifetime", 0)
         if file:
@@ -4620,13 +5564,16 @@ async def death_leaderboard(interaction: discord.Interaction, metric: discord.ap
     discord.app_commands.Choice(name="Kill/Death", value="kd_ratio"),
     discord.app_commands.Choice(name="Kill/Game", value="kills_per_game"),
     discord.app_commands.Choice(name="Kill/Win", value="kills_per_win"),
+    discord.app_commands.Choice(name="Kill/Hour", value="kills_per_hour"),
     discord.app_commands.Choice(name="Damage/Game", value="damage_per_game"),
     discord.app_commands.Choice(name="Damage/Sheep", value="damage_per_sheep"),
     discord.app_commands.Choice(name="Wools/Game", value="wools_per_game"),
+    discord.app_commands.Choice(name="Sheeps/Game", value="sheeps_per_game"),
     discord.app_commands.Choice(name="Void Kill/Death", value="void_kd_ratio"),
     discord.app_commands.Choice(name="Explosive Kill/Death", value="explosive_kd_ratio"),
     discord.app_commands.Choice(name="Bow Kill/Death", value="bow_kd_ratio"),
     discord.app_commands.Choice(name="Melee Kill/Death", value="melee_kd_ratio"),
+    discord.app_commands.Choice(name="Wins/Hour", value="wins_per_hour"),
     discord.app_commands.Choice(name="EXP/Hour", value="exp_per_hour"),
     discord.app_commands.Choice(name="EXP/Game", value="exp_per_game"),
 ])
@@ -4643,8 +5590,8 @@ async def ratio_leaderboard(interaction: discord.Interaction, metric: discord.ap
             await interaction.followup.send("[ERROR] Excel file not found")
             return
         
-        cache_data = await STATS_CACHE.get_data()
-        processed_data = _process_ratio_data(cache_data, metric.value)
+        # Load data directly from Excel instead of cache
+        processed_data = await asyncio.to_thread(_load_ratio_leaderboard_data_from_excel, metric.value)
         view = RatioLeaderboardView(metric.value, processed_data)
         embed, file, _ = await asyncio.to_thread(view.generate_leaderboard_image, "lifetime", 0)
         if file:
@@ -4692,6 +5639,39 @@ async def prestiges(interaction: discord.Interaction):
     except Exception as e:
         await interaction.followup.send(f"[ERROR] {str(e)}")
 
+@bot.tree.command(name="stopbot", description="Gracefully shutdown the bot (admin only)")
+async def stopbot(interaction: discord.Interaction):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ This command is only available to bot administrators.", ephemeral=True)
+        return
+    
+    await interaction.response.send_message("🛑 Shutting down bot gracefully... Please wait for all tasks to complete.", ephemeral=True)
+    print(f"[SHUTDOWN] Bot shutdown initiated by {interaction.user.name} ({interaction.user.id})")
+    print(f"[SHUTDOWN] Waiting for background tasks to complete...")
+    
+    # Cancel background tasks gracefully
+    if hasattr(bot, 'background_tasks'):
+        for task in bot.background_tasks:
+            if not task.done():
+                task.cancel()
+        
+        # Wait for tasks to complete their cleanup with timeout
+        results = await asyncio.gather(*bot.background_tasks, return_exceptions=True)
+        for i, result in enumerate(results):
+            if isinstance(result, asyncio.CancelledError):
+                print(f"[SHUTDOWN] Background task {i+1} cancelled successfully")
+            elif isinstance(result, Exception):
+                print(f"[SHUTDOWN] Background task {i+1} raised exception: {result}")
+            else:
+                print(f"[SHUTDOWN] Background task {i+1} completed normally")
+    
+    # Wait for any pending Discord operations
+    print(f"[SHUTDOWN] Waiting for pending operations...")
+    await asyncio.sleep(2)  # Give time for any pending messages/edits
+    
+    print(f"[SHUTDOWN] All cleanup complete, closing bot...")
+    await bot.close()
+
 # Run bot
 if __name__ == "__main__":
-    bot.run(DISCORD_TOKEN)
+    bot.run(DISCORD_TOKEN) 

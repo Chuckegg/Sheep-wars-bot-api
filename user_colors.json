@@ -212,8 +212,8 @@
   "kimmiii20": {
     "color": "#FFAA00",
     "rank": "SUPERSTAR",
-    "guild_tag": "FELLAS",
-    "guild_color": "GOLD"
+    "guild_tag": "QUEBEC",
+    "guild_color": "DARK_GREEN"
   },
   "__feared": {
     "color": "#FFFFFF",
@@ -254,13 +254,19 @@
   "ewz_": {
     "color": "#FFAA00",
     "rank": "SUPERSTAR",
-    "guild_tag": null,
-    "guild_color": null
+    "guild_tag": "QUEBEC",
+    "guild_color": "DARK_GREEN"
   },
   "oalkaline": {
     "color": "#FFAA00",
     "rank": "SUPERSTAR",
     "guild_tag": "EDATE",
     "guild_color": "DARK_GREEN"
+  },
+  "cheerlilly26": {
+    "color": "#00AA00",
+    "rank": "VIP_PLUS",
+    "guild_tag": null,
+    "guild_color": null
   }
 }

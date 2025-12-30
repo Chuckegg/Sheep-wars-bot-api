@@ -1,0 +1,50 @@
+{
+  "Chuckegg": {
+    "winstreak": 0,
+    "killstreak": 0,
+    "last_wins": 18597,
+    "last_losses": 6133,
+    "last_kills": 36132,
+    "last_deaths": 9931
+  },
+  "pogdvde": {
+    "winstreak": 0,
+    "killstreak": 0,
+    "last_wins": 13482,
+    "last_losses": 6245,
+    "last_kills": 29703,
+    "last_deaths": 8988
+  },
+  "Dejectin": {
+    "winstreak": 0,
+    "killstreak": 0,
+    "last_wins": 23427,
+    "last_losses": 2045,
+    "last_kills": 53531,
+    "last_deaths": 3486
+  },
+  "Kimmiii20": {
+    "winstreak": 1,
+    "killstreak": 0,
+    "last_wins": 1459,
+    "last_losses": 807,
+    "last_kills": 1955,
+    "last_deaths": 1155
+  },
+  "Qrsn": {
+    "winstreak": 0,
+    "killstreak": 0,
+    "last_wins": 8609,
+    "last_losses": 2939,
+    "last_kills": 17550,
+    "last_deaths": 4500
+  },
+  "Hiiiii": {
+    "winstreak": 5,
+    "killstreak": 8,
+    "last_wins": 2467,
+    "last_losses": 351,
+    "last_kills": 2472,
+    "last_deaths": 677
+  }
+}
