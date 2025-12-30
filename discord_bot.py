@@ -303,6 +303,16 @@ PRESTIGE_COLORS = {
     3800: (170, 0, 170),     # &5 -> DARK_PURPLE
     3900: None,              # Rainbow
     4000: (85, 85, 85),      # &8 -> DARK_GRAY
+    4100: (255, 255, 255),   # &f -> WHITE
+    4200: (255, 85, 85),     # &c -> RED
+    4300: (255, 170, 0),     # &6 -> GOLD
+    4400: (255, 255, 85),    # &e -> YELLOW
+    4500: (85, 255, 85),     # &a -> GREEN
+    4600: (0, 170, 170),     # &3 -> DARK_AQUA
+    4700: (255, 85, 255),    # &d -> LIGHT_PURPLE
+    4800: (170, 0, 170),     # &5 -> DARK_PURPLE
+    4900: None,              # Rainbow
+    5000: None,              # Rainbow (High level default)
 }
 
 
@@ -528,7 +538,7 @@ PRESTIGE_RAW_PATTERNS = {
     500: "&a[500♙]",
     600: "&3[600⚡]",
     700: "&5[700✠]",
-    800: "&d[800⏹]",
+    800: "&d[800✏]",
     900: "&c[&69&e0&a0&b✏&d]",
     1000: "&0[&f1000☯&0]",
     1100: "&0[&81100☃️&0]",
@@ -538,7 +548,7 @@ PRESTIGE_RAW_PATTERNS = {
     1500: "&0[&a1500♚&0]",
     1600: "&0[&31600❉&0]",
     1700: "&0[&51700Σ&0]",
-    1800: "&0[&d1800￡&0]",
+    1800: "&0[&d1800✖&0]",
     1900: "&c[&61&e9&a0&30&5✖&d]",
     2000: "&0[2&80&700&f❁]",
     2100: "&f[2&710&80&0✚]",
@@ -548,7 +558,7 @@ PRESTIGE_RAW_PATTERNS = {
     2500: "&f[2&a500&2☾⋆⁺]",
     2600: "&f[2&b60&30&9⚜&1]",
     2700: "&f[2&d700&5✦]",
-    2800: "&c[2&480&50&d⚝]",
+    2800: "&c[2&480&50&d✉]",
     2900: "&d[&52&39&a0&e0&6✉&c]",
     3000: "&f[&03&80&00&80&0ツ&f]",
     3100: "&0[&f3&71&f0&70&f❣&0]",
@@ -561,6 +571,7 @@ PRESTIGE_RAW_PATTERNS = {
     3800: "&0[&53&48&50&40&5⋚⋚&0]",
     3900: "&4[&63&e9&20&10&5Φ&d]",
     4000: "&0[4&80&70&80&0✌]",
+    4900: "&4[&64&e9&a0&30&5✖&d]",
 }
 
 def _parse_raw_pattern(raw: str) -> list:
@@ -585,31 +596,18 @@ def _parse_raw_pattern(raw: str) -> list:
         parts.append((cur_code or 'f', buf))
     return parts
 
-
-def render_prestige_with_text(level: int, icon: str, ign: str, suffix: str = "", ign_color: str = None, 
-                              guild_tag: str = None, guild_color: str = None, two_line: bool = False) -> io.BytesIO:
-    """Render a prestige prefix with IGN, optional guild tag, and optional suffix text.
-    
-    Returns a BytesIO containing the rendered PNG image.
-    If Pillow is not available, raises RuntimeError.
-    ign_color: Hex color code for the IGN (e.g., '#FF5555')
-    guild_tag: Guild tag to display after username (e.g., 'QUEBEC')
-    guild_color: Color name from Hypixel API (e.g., 'DARK_AQUA')
-    two_line: If True, formats as [level icon] username [guild] on first line, suffix on second line
-    """
-    if Image is None:
-        raise RuntimeError("Pillow not available")
-    
+def get_prestige_segments(level: int, icon: str) -> list:
+    """Generate colored text segments for a prestige level."""
     base = (level // 100) * 100
     raw = PRESTIGE_RAW_PATTERNS.get(base)
-    
     segments = []
+
+    # Check if this should be rainbow (explicitly defined as None in colors, or ends in 900)
+    # Also treat anything >= 5000 as rainbow based on user feedback
+    is_rainbow = (base in PRESTIGE_COLORS and PRESTIGE_COLORS[base] is None) or (base % 1000 == 900) or (base >= 5000)
     
     if raw:
-        # Parse the pattern and replace the level number
         parts = _parse_raw_pattern(raw)
-        
-        # Build segments with the actual level
         concat = ''.join(t for (_, t) in parts)
         m = re.search(r"\d+", concat)
         
@@ -635,10 +633,7 @@ def render_prestige_with_text(level: int, icon: str, ign: str, suffix: str = "",
                 
                 # Replace with actual level
                 if not replaced:
-                    # Check if this is a rainbow prestige
-                    rainbow_bases = {k for k, v in PRESTIGE_COLORS.items() if v is None}
-                    if base in rainbow_bases:
-                        # Build rainbow colors
+                    if is_rainbow:
                         colors_in_span = []
                         pos2 = 0
                         for c_code, c_text in parts:
@@ -656,7 +651,6 @@ def render_prestige_with_text(level: int, icon: str, ign: str, suffix: str = "",
                             RAINBOW_CODES = ['c', '6', 'e', 'a', 'b', 'd', '9', '3']
                             colors_in_span = [MINECRAFT_CODE_TO_HEX.get(c, '#FFFFFF') for c in RAINBOW_CODES]
                         
-                        # Apply colors to level digits
                         for i, ch in enumerate(str(level)):
                             col = colors_in_span[i % len(colors_in_span)]
                             segments.append((col, ch))
@@ -669,13 +663,43 @@ def render_prestige_with_text(level: int, icon: str, ign: str, suffix: str = "",
                 if suffix_start_in_part < len(text):
                     segments.append((hexcol, text[suffix_start_in_part:]))
         else:
-            # No number found, use pattern as-is
             segments = [(MINECRAFT_CODE_TO_HEX.get(code, '#FFFFFF'), text) for code, text in parts]
     else:
-        # Fallback: simple colored bracket
-        color = get_prestige_color(level)
-        hexcol = '#{:02x}{:02x}{:02x}'.format(*color)
-        segments = [(hexcol, f"[{level}{icon}]")]
+        if is_rainbow:
+            # Default rainbow behavior for undefined high levels (e.g. 4900)
+            bracket_col = MINECRAFT_CODE_TO_HEX.get('8', '#555555') # Dark Gray
+            segments.append((bracket_col, "["))
+            
+            RAINBOW_CODES = ['c', '6', 'e', 'a', 'b', 'd', '9', '3']
+            rainbow_hexes = [MINECRAFT_CODE_TO_HEX.get(c, '#FFFFFF') for c in RAINBOW_CODES]
+            
+            for i, ch in enumerate(str(level)):
+                col = rainbow_hexes[i % len(rainbow_hexes)]
+                segments.append((col, ch))
+                
+            segments.append((bracket_col, f"{icon}]"))
+        else:
+            color = get_prestige_color(level)
+            hexcol = '#{:02x}{:02x}{:02x}'.format(*color)
+            segments = [(hexcol, f"[{level}{icon}]")]
+    
+    return segments
+
+def render_prestige_with_text(level: int, icon: str, ign: str, suffix: str = "", ign_color: str = None, 
+                              guild_tag: str = None, guild_color: str = None, two_line: bool = False) -> io.BytesIO:
+    """Render a prestige prefix with IGN, optional guild tag, and optional suffix text.
+    
+    Returns a BytesIO containing the rendered PNG image.
+    If Pillow is not available, raises RuntimeError.
+    ign_color: Hex color code for the IGN (e.g., '#FF5555')
+    guild_tag: Guild tag to display after username (e.g., 'QUEBEC')
+    guild_color: Color name from Hypixel API (e.g., 'DARK_AQUA')
+    two_line: If True, formats as [level icon] username [guild] on first line, suffix on second line
+    """
+    if Image is None:
+        raise RuntimeError("Pillow not available")
+    
+    segments = get_prestige_segments(level, icon)
     
     # Add IGN with custom color if specified
     ign_hex = ign_color if ign_color else MINECRAFT_CODE_TO_HEX.get('f', '#FFFFFF')
@@ -851,7 +875,15 @@ def create_stats_composite_image(level, icon, ign, tab_name, wins, losses, wl_ra
             pass
 
     c1 = render_modern_card("IGN", ign, header_card_w, 85, is_header=True, color=ign_rgb)
-    c2 = render_modern_card("Level", f"[{int(level)}{icon}]", header_card_w, 85, color=(85, 255, 85))
+    
+    # Render Level card with multi-color support
+    c2 = render_modern_card("Level", "", header_card_w, 85)
+    segs = get_prestige_segments(level, icon)
+    font_lvl = _load_font("DejaVuSans-Bold.ttf", 24)
+    txt_io = _render_text_segments_to_image(segs, font=font_lvl, padding=(0,0))
+    txt_img = Image.open(txt_io).convert("RGBA")
+    c2.paste(txt_img, ((c2.width - txt_img.width) // 2, int(c2.height * 0.5)), txt_img)
+
     c3 = render_modern_card("Mode", tab_name.upper(), header_card_w, 85)
     c4 = render_modern_card("Playtime", formatted_playtime, header_card_w, 85, is_header=True, color=(255, 85, 255))
     
@@ -1084,15 +1116,22 @@ def create_leaderboard_image(tab_name: str, metric_label: str, leaderboard_data:
         draw.text((margin + 20, y + 15), f"#{rank}", font=font_rank, fill=r_col)
         
         # Prestige
-        p_text = f"[{level}{icon}]"
-        p_color = get_prestige_color(level)
         rank_w = draw.textbbox((0,0), f"#{rank}", font=font_rank)[2] - draw.textbbox((0,0), f"#{rank}", font=font_rank)[0]
         p_x = margin + 20 + rank_w + 15
-        draw.text((p_x, y + 15), p_text, font=font_name, fill=p_color)
+        
+        segments = get_prestige_segments(level, icon)
+        current_x = p_x
+        for hex_color, text in segments:
+            try:
+                rgb = tuple(int(hex_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
+            except:
+                rgb = (255, 255, 255)
+            draw.text((current_x, y + 15), text, font=font_name, fill=rgb)
+            seg_w = draw.textbbox((0,0), text, font=font_name)[2] - draw.textbbox((0,0), text, font=font_name)[0]
+            current_x += seg_w
         
         # Name
-        p_w = draw.textbbox((0,0), p_text, font=font_name)[2] - draw.textbbox((0,0), p_text, font=font_name)[0]
-        n_x = p_x + p_w + 10
+        n_x = current_x + 10
         try:
             p_rgb = tuple(int(str(p_hex).lstrip('#')[j:j+2], 16) for j in (0, 2, 4))
         except:
