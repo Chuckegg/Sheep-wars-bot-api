@@ -1355,7 +1355,12 @@ def create_leaderboard_image(tab_name: str, metric_label: str, leaderboard_data:
             draw.text((g_x, y + 15), f"[{g_tag}]", font=font_name, fill=g_rgb)
         
         # Value
-        val_str = format_playtime(int(value)) if is_playtime else f"{value:,}"
+        if is_playtime:
+            val_str = format_playtime(int(value))
+        elif "Ratio" in metric_label or "/" in metric_label or "Per" in metric_label:
+            val_str = f"{float(value):,.2f}"
+        else:
+            val_str = f"{int(value):,}"
         v_w = draw.textbbox((0,0), val_str, font=font_val)[2] - draw.textbbox((0,0), val_str, font=font_val)[0]
         draw.text((canvas_w - margin - 20 - v_w, y + 15), val_str, font=font_val, fill=(85, 255, 255))
         
@@ -1469,7 +1474,7 @@ def create_distribution_pie(title: str, slices: list) -> io.BytesIO:
         percent = (value / total * 100) if total else 0
         y = legend_y + idx * line_spacing
         draw.rectangle([legend_x, y, legend_x + box_size, y + box_size], fill=color, outline=(240, 240, 240))
-        text = f"{label}: {value} ({percent:.1f}%)"
+        text = f"{label}: {value} ({percent:.2f}%)"
         draw.text((legend_x + box_size + 10, y - 2), text, font=legend_font, fill=(220, 220, 220))
 
     # Footer
@@ -3024,8 +3029,10 @@ class LeaderboardView(discord.ui.View):
 
             if is_playtime:
                 formatted_value = format_playtime(int(value))
+            elif "Ratio" in metric_label or "/" in metric_label or "Per" in metric_label:
+                formatted_value = f"{float(value):,.2f}"
             else:
-                formatted_value = f"{value}"
+                formatted_value = f"{int(value):,}"
 
             description_lines.append(f"{medal} {prestige_display} {player}: {formatted_value}")
 
@@ -3298,7 +3305,10 @@ class RatioLeaderboardView(discord.ui.View):
             medal = {1: "1.", 2: "2.", 3: "3."}.get(start_index + idx + 1, f"{start_index + idx + 1}.")
             prestige_display = format_prestige_ansi(level_value, icon)
 
-            formatted_value = f"{value}"
+            if "Ratio" in metric_label or "/" in metric_label or "Per" in metric_label:
+                formatted_value = f"{float(value):,.2f}"
+            else:
+                formatted_value = f"{value}"
 
             description_lines.append(f"{medal} {prestige_display} {player}: {formatted_value}")
 
