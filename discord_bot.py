@@ -2047,6 +2047,15 @@ def set_default_user(discord_user_id: int, ign: str):
     defaults[str(discord_user_id)] = ign
     save_default_users(defaults)
 
+def remove_default_user(discord_user_id: int) -> bool:
+    defaults = load_default_users()
+    key = str(discord_user_id)
+    if key in defaults:
+        del defaults[key]
+        save_default_users(defaults)
+        return True
+    return False
+
 def get_default_user(discord_user_id: int) -> str | None:
     defaults = load_default_users()
     return defaults.get(str(discord_user_id))
@@ -3831,6 +3840,16 @@ async def default(interaction: discord.Interaction, ign: str):
     except Exception as e:
         await interaction.followup.send(f"[ERROR] Failed to set default: {str(e)}", ephemeral=True)
 
+@bot.tree.command(name="removedefault", description="Remove your default Minecraft username")
+async def removedefault(interaction: discord.Interaction):
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True)
+    
+    removed = remove_default_user(interaction.user.id)
+    if removed:
+        await interaction.followup.send("Your default username has been removed.", ephemeral=True)
+    else:
+        await interaction.followup.send("You don't have a default username set.", ephemeral=True)
 
 @bot.tree.command(name="prestige", description="Display a prestige prefix for any level")
 @discord.app_commands.describe(
@@ -4356,8 +4375,17 @@ async def deathdistribution(interaction: discord.Interaction, ign: str = None):
     except Exception as e:
         await interaction.followup.send(f"[ERROR] {str(e)}")
 
-@bot.tree.command(name="sheepwars", description="Get player stats")
-async def sheepwars(interaction: discord.Interaction, ign: str):
+@bot.tree.command(name="sheepwars", description="Get player stats with deltas")
+@discord.app_commands.describe(ign="Minecraft IGN (optional if you set /default)")
+async def sheepwars(interaction: discord.Interaction, ign: str = None):
+    # Resolve default IGN if not provided
+    if ign is None or str(ign).strip() == "":
+        default_ign = get_default_user(interaction.user.id)
+        if not default_ign:
+            await interaction.response.send_message("You don't have a default username set. Use /default to set one.", ephemeral=True)
+            return
+        ign = default_ign
+
     # Validate username early
     ok, proper_ign = validate_and_normalize_ign(ign)
     if not ok:
