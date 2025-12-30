@@ -488,7 +488,10 @@ def save_user_color_and_rank(username: str, rank: Optional[str], guild_tag: Opti
     if username_key in color_data:
         # User exists - only update rank and guild info, preserve their color
         existing_entry = color_data[username_key]
-        print(f"[DEBUG] User {username} already exists with data: {existing_entry}")
+        try:
+            print(f"[DEBUG] User {username} already exists with data: {existing_entry}")
+        except UnicodeEncodeError:
+            print(f"[DEBUG] User {username} already exists with data (unicode display issue)")
         
         if isinstance(existing_entry, str):
             # Old format (just color string), convert to new format
@@ -502,14 +505,20 @@ def save_user_color_and_rank(username: str, rank: Optional[str], guild_tag: Opti
         else:
             # New format, update rank and guild info, preserve color
             old_color = existing_entry.get("color")
-            print(f"[DEBUG] Preserving existing color {old_color}, updating rank to {rank}, guild: {guild_tag}")
+            try:
+                print(f"[DEBUG] Preserving existing color {old_color}, updating rank to {rank}, guild: {guild_tag}")
+            except UnicodeEncodeError:
+                print(f"[DEBUG] Preserving existing color {old_color}, updating rank to {rank}, guild: (unicode display issue)")
             color_data[username_key]["rank"] = rank
             color_data[username_key]["guild_tag"] = guild_tag
             color_data[username_key]["guild_color"] = guild_color
     else:
         # NEW USER - assign color based on rank automatically
         auto_color = get_rank_color(rank)
-        print(f"[DEBUG] NEW USER {username} - assigning auto color {auto_color} for rank {rank}, guild: {guild_tag}")
+        try:
+            print(f"[DEBUG] NEW USER {username} - assigning auto color {auto_color} for rank {rank}, guild: {guild_tag}")
+        except UnicodeEncodeError:
+            print(f"[DEBUG] NEW USER {username} - assigning auto color {auto_color} for rank {rank}, guild: (unicode display issue)")
         color_data[username_key] = {
             "color": auto_color, 
             "rank": rank,
@@ -518,9 +527,12 @@ def save_user_color_and_rank(username: str, rank: Optional[str], guild_tag: Opti
         }
     
     # Save back to file
-    print(f"[DEBUG] Saving to file: {username_key} -> {color_data[username_key]}")
-    with open(colors_file, 'w') as f:
-        json.dump(color_data, f, indent=2)
+    try:
+        print(f"[DEBUG] Saving to file: {username_key} -> {color_data[username_key]}")
+    except UnicodeEncodeError:
+        print(f"[DEBUG] Saving to file: {username_key} (unicode display issue)")
+    with open(colors_file, 'w', encoding='utf-8') as f:
+        json.dump(color_data, f, indent=2, ensure_ascii=False)
 
 
 def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | None = None):
@@ -632,7 +644,10 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
             json.dump(guild_data, f, indent=2)
         print(f"[DEBUG] Guild data saved to guild_info.json")
         guild_tag, guild_color = extract_guild_info(guild_data)
-        print(f"[DEBUG] Extracted guild tag: {guild_tag}, color: {guild_color}")
+        try:
+            print(f"[DEBUG] Extracted guild tag: {guild_tag}, color: {guild_color}")
+        except UnicodeEncodeError:
+            print(f"[DEBUG] Extracted guild tag (unicode display issue), color: {guild_color}")
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 429:
             print(f"[DEBUG] Rate limited (429) fetching guild data for {proper_username}. Using cached data.")

@@ -87,7 +87,7 @@ def rotate_daily_to_yesterday():
     """Copy daily snapshot (column F) to yesterday snapshot (column H) for all users."""
     if not os.path.exists(EXCEL_FILE):
         print("[SKIP] Excel file not found")
-        return
+        return {}
     
     wb = None
     try:
@@ -132,14 +132,14 @@ def rotate_daily_to_yesterday():
         save_success = safe_save_workbook(wb, EXCEL_FILE)
         if not save_success:
             print("[ERROR] Failed to save Excel file after rotation")
-            return 0
+            return {}
         
         print(f"\n[SUMMARY] Rotated daily→yesterday for {updated_count}/{len(users)} users")
-        return updated_count
+        return {}
         
     except Exception as e:
         print(f"[ERROR] Exception during rotate_daily_to_yesterday: {e}")
-        return 0
+        return {}
         
     finally:
         # FAILSAFE: Always close workbook even if an error occurs

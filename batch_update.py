@@ -181,7 +181,7 @@ def rotate_daily_to_yesterday() -> dict:
                 print("[ERROR] Failed to save Excel file after rotation", flush=True)
                 return {u: False for u in users}  # Mark all as failed
             
-            print(f"\n[SUMMARY] Rotated daily→yesterday for {sum(results.values())}/{len(users)} users", flush=True)
+            print(f"\n[SUMMARY] Rotated daily->yesterday for {sum(results.values())}/{len(users)} users", flush=True)
             return results
         
     except Exception as e:
@@ -234,9 +234,9 @@ def batch_update(schedule: str, api_key: str | None = None) -> dict:
     Returns:
         Dict with results: {username: (success, snapshots_taken)}
     """
-    # Special handling for 'yesterday' schedule - rotate daily→yesterday without API calls
+    # Special handling for 'yesterday' schedule - rotate daily->yesterday without API calls
     if schedule == 'yesterday':
-        print("[INFO] Running yesterday rotation (copying daily→yesterday snapshots)", flush=True)
+        print("[INFO] Running yesterday rotation (copying daily->yesterday snapshots)", flush=True)
         results = rotate_daily_to_yesterday()
         # Return results in the expected format
         return {username: (success, ['rotate']) for username, success in results.items()}
