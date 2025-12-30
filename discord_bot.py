@@ -1184,6 +1184,8 @@ def create_full_stats_image(ign: str, tab_name: str, level: int, icon: str, stat
     grid_height = sum(line_heights) + spacing * (len(rendered_lines) - 1)
     grid_width = line_width_max
 
+    margin_x = 40
+
     # Scale title if too wide
     title_width = title_img.width
     title_height = title_img.height
@@ -1193,8 +1195,8 @@ def create_full_stats_image(ign: str, tab_name: str, level: int, icon: str, stat
         title_height = int(title_img.height * scale_factor)
         title_img = title_img.resize((title_width, title_height), Image.LANCZOS)
 
-    title_x_offset = (grid_width - title_width) // 2
-    composite_width = grid_width
+    composite_width = grid_width + (margin_x * 2)
+    title_x_offset = (composite_width - title_width) // 2
     bottom_padding = 40
     composite_height = title_height + spacing + grid_height + bottom_padding
 
@@ -1205,7 +1207,7 @@ def create_full_stats_image(ign: str, tab_name: str, level: int, icon: str, stat
     y_offset = title_height + spacing
     for idx, line in enumerate(rendered_lines):
         line_width = line_widths[idx]
-        x_start = (grid_width - line_width) // 2 if line_width > 0 else 0
+        x_start = margin_x + (grid_width - line_width) // 2 if line_width > 0 else margin_x
         x = x_start
         for box in line:
             composite.paste(box, (x, y_offset), box)
@@ -1230,14 +1232,14 @@ def create_full_stats_image(ign: str, tab_name: str, level: int, icon: str, stat
 
 def create_leaderboard_image(tab_name: str, metric_label: str, leaderboard_data: list, page: int = 0, total_pages: int = 1) -> io.BytesIO:
     # Design constants matching sheepwars command
-    canvas_w = 1000
+    canvas_w = 1200
     margin = 40
     spacing = 10
     row_height = 60
     header_height = 80
     
     content_height = header_height + spacing + (len(leaderboard_data) * (row_height + spacing))
-    canvas_h = margin + content_height + margin + 40
+    canvas_h = margin + content_height + margin
     
     img = Image.new('RGBA', (canvas_w, canvas_h), (18, 18, 20, 255))
     draw = ImageDraw.Draw(img)
