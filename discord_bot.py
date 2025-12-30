@@ -106,6 +106,47 @@ def _load_font(font_name: str, font_size: int):
     except:
         return ImageFont.load_default()
 
+LOCK_FILE = str(BOT_DIR / "stats.xlsx.lock")
+
+class FileLock:
+    """Simple file-based lock to prevent concurrent Excel writes."""
+    def __init__(self, lock_file, timeout=20, delay=0.1):
+        self.lock_file = lock_file
+        self.timeout = timeout
+        self.delay = delay
+        self._fd = None
+
+    def __enter__(self):
+        start_time = time.time()
+        while True:
+            try:
+                # Exclusive creation of lock file
+                self._fd = os.open(self.lock_file, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                break
+            except FileExistsError:
+                # Check for stale lock (older than 60 seconds)
+                try:
+                    if os.path.exists(self.lock_file) and time.time() - os.stat(self.lock_file).st_mtime > 60:
+                        try:
+                            os.remove(self.lock_file)
+                        except OSError:
+                            pass
+                        continue
+                except OSError:
+                    pass
+                if time.time() - start_time >= self.timeout:
+                    raise TimeoutError(f"Could not acquire lock on {self.lock_file}")
+                time.sleep(self.delay)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._fd is not None:
+            os.close(self._fd)
+            try:
+                os.remove(self.lock_file)
+            except OSError:
+                pass
+
 # Global Cache System
 class StatsCache:
     def __init__(self):
@@ -138,59 +179,60 @@ class StatsCache:
             return self.data
 
     def _load_from_excel(self):
-        wb = load_workbook(str(self.excel_path), read_only=True, data_only=True)
-        cache = {}
-        
-        # Load colors once
-        all_user_data = {}
-        if os.path.exists(USER_COLORS_FILE):
-            try:
-                with open(USER_COLORS_FILE, 'r') as f: all_user_data = json.load(f)
-            except: pass
+        with FileLock(LOCK_FILE):
+            wb = load_workbook(str(self.excel_path), read_only=True, data_only=True)
+            cache = {}
+            
+            # Load colors once
+            all_user_data = {}
+            if os.path.exists(USER_COLORS_FILE):
+                try:
+                    with open(USER_COLORS_FILE, 'r') as f: all_user_data = json.load(f)
+                except: pass
 
-        for sheet_name in wb.sheetnames:
-            if sheet_name.casefold() == "sheep wars historical data": continue
-            try:
-                sheet = wb[sheet_name]
-                user_cache = {"stats": {}, "meta": {}}
-                
-                # Read all rows efficiently
-                rows = list(sheet.iter_rows(min_row=1, max_row=200, values_only=True))
-                
-                for row in rows:
-                    if not row or not row[0]: continue
-                    stat_name = str(row[0]).lower()
+            for sheet_name in wb.sheetnames:
+                if sheet_name.casefold() == "sheep wars historical data": continue
+                try:
+                    sheet = wb[sheet_name]
+                    user_cache = {"stats": {}, "meta": {}}
                     
-                    def get_val(idx):
-                        return _to_number(row[idx]) if idx < len(row) else 0.0
+                    # Read all rows efficiently
+                    rows = list(sheet.iter_rows(min_row=1, max_row=200, values_only=True))
+                    
+                    for row in rows:
+                        if not row or not row[0]: continue
+                        stat_name = str(row[0]).lower()
                         
-                    user_cache["stats"][stat_name] = {
-                        "lifetime": get_val(1),
-                        "session": get_val(2),
-                        "daily": get_val(4),
-                        "yesterday": get_val(6),
-                        "monthly": get_val(8)
-                    }
-                
-                # Meta
-                level = int(user_cache["stats"].get('level', {}).get('lifetime', 0))
-                if level == 0 and 'experience' in user_cache["stats"]:
-                    level = int(user_cache["stats"]['experience']['lifetime'] / 5000)
-                
-                user_info = all_user_data.get(sheet_name.lower(), {})
-                if isinstance(user_info, str):
-                    ign_color, g_tag, g_hex = user_info, None, "#AAAAAA"
-                else:
-                    ign_color = user_info.get('color', '#FFFFFF')
-                    g_tag = user_info.get('guild_tag')
-                    g_hex = MINECRAFT_NAME_TO_HEX.get(str(user_info.get('guild_color', 'GRAY')).upper(), "#AAAAAA")
+                        def get_val(idx):
+                            return _to_number(row[idx]) if idx < len(row) else 0.0
+                            
+                        user_cache["stats"][stat_name] = {
+                            "lifetime": get_val(1),
+                            "session": get_val(2),
+                            "daily": get_val(4),
+                            "yesterday": get_val(6),
+                            "monthly": get_val(8)
+                        }
+                    
+                    # Meta
+                    level = int(user_cache["stats"].get('level', {}).get('lifetime', 0))
+                    if level == 0 and 'experience' in user_cache["stats"]:
+                        level = int(user_cache["stats"]['experience']['lifetime'] / 5000)
+                    
+                    user_info = all_user_data.get(sheet_name.lower(), {})
+                    if isinstance(user_info, str):
+                        ign_color, g_tag, g_hex = user_info, None, "#AAAAAA"
+                    else:
+                        ign_color = user_info.get('color', '#FFFFFF')
+                        g_tag = user_info.get('guild_tag')
+                        g_hex = MINECRAFT_NAME_TO_HEX.get(str(user_info.get('guild_color', 'GRAY')).upper(), "#AAAAAA")
 
-                user_cache["meta"] = {"level": level, "icon": get_prestige_icon(level), "ign_color": ign_color, "guild_tag": g_tag, "guild_hex": g_hex, "username": sheet_name}
-                cache[sheet_name] = user_cache
-            except Exception: continue
-        
-        wb.close()
-        return cache
+                    user_cache["meta"] = {"level": level, "icon": get_prestige_icon(level), "ign_color": ign_color, "guild_tag": g_tag, "guild_hex": g_hex, "username": sheet_name}
+                    cache[sheet_name] = user_cache
+                except Exception: continue
+            
+            wb.close()
+            return cache
 
     async def update_cache_entry(self, username: str, processed_stats: dict):
         """Update a single user's cache entry from api_get.py output without reloading Excel."""
@@ -1855,23 +1897,24 @@ def delete_user_sheet(ign: str) -> bool:
         
         wb = None
         try:
-            # FAILSAFE: Load workbook with guaranteed cleanup
-            wb = load_workbook(str(excel_file))
-            key = ign.casefold()
-            sheet_to_delete = None
-            
-            for sheet_name in wb.sheetnames:
-                if sheet_name.casefold() == key:
-                    sheet_to_delete = sheet_name
-                    break
-            
-            if sheet_to_delete:
-                del wb[sheet_to_delete]
-                save_success = safe_save_workbook(wb, str(excel_file))
-                if not save_success:
-                    print(f"[ERROR] Failed to save after deleting sheet for {ign}")
-                    return False
-                return True
+            with FileLock(LOCK_FILE):
+                # FAILSAFE: Load workbook with guaranteed cleanup
+                wb = load_workbook(str(excel_file))
+                key = ign.casefold()
+                sheet_to_delete = None
+                
+                for sheet_name in wb.sheetnames:
+                    if sheet_name.casefold() == key:
+                        sheet_to_delete = sheet_name
+                        break
+                
+                if sheet_to_delete:
+                    del wb[sheet_to_delete]
+                    save_success = safe_save_workbook(wb, str(excel_file))
+                    if not save_success:
+                        print(f"[ERROR] Failed to save after deleting sheet for {ign}")
+                        return False
+                    return True
         finally:
             if wb is not None:
                 wb.close()

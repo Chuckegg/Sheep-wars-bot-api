@@ -135,23 +135,12 @@ def rotate_daily_to_yesterday() -> dict:
     
     wb = None
     try:
-        # FAILSAFE: Load workbook with guaranteed cleanup
-        wb = load_workbook(EXCEL_FILE)
-        users = load_tracked_users()
-        results = {}
-        
-        for username in users:
-            if username not in wb.sheetnames:
-                print(f"[SKIP] {username} - sheet not found", flush=True)
-                results[username] = False
-                continue
         with FileLock(LOCK_FILE):
             # FAILSAFE: Load workbook with guaranteed cleanup
             wb = load_workbook(EXCEL_FILE)
             users = load_tracked_users()
             results = {}
             
-            ws = wb[username]
             for username in users:
                 if username not in wb.sheetnames:
                     print(f"[SKIP] {username} - sheet not found", flush=True)
@@ -186,47 +175,14 @@ def rotate_daily_to_yesterday() -> dict:
                 print(f"[OK] {username} - copied {copied_rows} rows from daily to yesterday", flush=True)
                 results[username] = True
             
-            # Check if sheet has the expected layout (column F = Daily Snapshot, H = Yesterday Snapshot)
-            header_f = ws.cell(row=1, column=6).value
-            header_h = ws.cell(row=1, column=8).value
             # Use safe save with backup and error recovery
             save_success = safe_save_workbook(wb, EXCEL_FILE)
             if not save_success:
                 print("[ERROR] Failed to save Excel file after rotation", flush=True)
                 return {u: False for u in users}  # Mark all as failed
             
-            if header_f != "Daily Snapshot" or header_h != "Yesterday Snapshot":
-                print(f"[SKIP] {username} - unexpected layout", flush=True)
-                results[username] = False
-                continue
-            
-            # Copy all values from column F (Daily Snapshot) to column H (Yesterday Snapshot)
-            row = 2
-            copied_rows = 0
-            while True:
-                daily_val = ws.cell(row=row, column=6).value
-                if daily_val is None and row > 100:  # Stop if we've gone past data
-                    break
-                
-                # Copy daily snapshot to yesterday snapshot
-                ws.cell(row=row, column=8, value=daily_val)
-                if daily_val is not None:
-                    copied_rows += 1
-                row += 1
-            
-            print(f"[OK] {username} - copied {copied_rows} rows from daily to yesterday", flush=True)
-            results[username] = True
             print(f"\n[SUMMARY] Rotated daily→yesterday for {sum(results.values())}/{len(users)} users", flush=True)
             return results
-        
-        # Use safe save with backup and error recovery
-        save_success = safe_save_workbook(wb, EXCEL_FILE)
-        if not save_success:
-            print("[ERROR] Failed to save Excel file after rotation", flush=True)
-            return {u: False for u in users}  # Mark all as failed
-        
-        print(f"\n[SUMMARY] Rotated daily→yesterday for {sum(results.values())}/{len(users)} users", flush=True)
-        return results
         
     except Exception as e:
         print(f"[ERROR] Exception during rotate_daily_to_yesterday: {e}", flush=True)
