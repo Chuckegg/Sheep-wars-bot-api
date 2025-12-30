@@ -714,6 +714,8 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
             c.font = Font(bold=True)
             c.alignment = Alignment(horizontal="center")
 
+        processed_stats = {}
+
         # Populate rows
         for idx, key in enumerate(ordered_keys):
             row = 2 + idx
@@ -750,6 +752,7 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
         # Compute numeric deltas for each period (current - snapshot). Treat missing
         # snapshot values as 0. This ensures the bot (which reads cell values)
         # sees numeric deltas rather than formula strings.
+        
         for idx, key in enumerate(ordered_keys):
             row = 2 + idx
             cur = current.get(key) or 0
@@ -764,6 +767,8 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
                 except Exception:
                     snap_val = 0
             ws.cell(row=row, column=sess_delta_col, value=(cur - snap_val))
+            sess_delta = cur - snap_val
+            ws.cell(row=row, column=sess_delta_col, value=sess_delta)
             # Daily delta
             snap_val = ws.cell(row=row, column=daily_snap_col).value
             try:
@@ -774,6 +779,8 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
                 except Exception:
                     snap_val = 0
             ws.cell(row=row, column=daily_delta_col, value=(cur - snap_val))
+            daily_delta = cur - snap_val
+            ws.cell(row=row, column=daily_delta_col, value=daily_delta)
             # Yesterday delta
             snap_val = ws.cell(row=row, column=yest_snap_col).value
             try:
@@ -784,6 +791,8 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
                 except Exception:
                     snap_val = 0
             ws.cell(row=row, column=yest_delta_col, value=(cur - snap_val))
+            yest_delta = cur - snap_val
+            ws.cell(row=row, column=yest_delta_col, value=yest_delta)
             # Monthly delta
             snap_val = ws.cell(row=row, column=mon_snap_col).value
             try:
@@ -794,6 +803,16 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
                 except Exception:
                     snap_val = 0
             ws.cell(row=row, column=mon_delta_col, value=(cur - snap_val))
+            mon_delta = cur - snap_val
+            ws.cell(row=row, column=mon_delta_col, value=mon_delta)
+
+            processed_stats[key.lower()] = {
+                "lifetime": cur,
+                "session": sess_delta,
+                "daily": daily_delta,
+                "yesterday": yest_delta,
+                "monthly": mon_delta
+            }
 
         # Force Excel to recalculate formulas on load so deltas show correctly
         try:
@@ -810,7 +829,9 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
         return {
             "uuid": uuid,
             "stats": current,
+            "processed_stats": processed_stats,
             "excel": EXCEL_FILE,
+            "username": proper_username
         }
     
     except Exception as e:
@@ -856,6 +877,7 @@ def main():
 
     res = api_update_sheet(args.username, api_key, snapshot_sections=sections)
     print(res)
+    print(json.dumps(res, default=str))
 
 if __name__ == "__main__":
     main()
