@@ -5,6 +5,14 @@ import sys
 import openpyxl
 from openpyxl import load_workbook
 import os
+
+# Database imports
+from db_helper import (
+    get_all_usernames,
+    get_user_stats_with_deltas,
+    get_user_meta,
+    user_exists
+)
 import re
 import shutil
 from zoneinfo import ZoneInfo
@@ -109,7 +117,8 @@ def _load_font(font_name: str, font_size: int):
     except:
         return ImageFont.load_default()
 
-LOCK_FILE = str(BOT_DIR / "stats.xlsx.lock")
+LOCK_FILE = str(BOT_DIR / "stats.xlsx.lock")  # Kept for backward compatibility
+DB_FILE = BOT_DIR / "stats.db"
 
 class FileLock:
     """Simple file-based lock to prevent concurrent Excel writes."""
@@ -156,23 +165,23 @@ class StatsCache:
         self.data = {}
         self.last_mtime = 0
         self.lock = asyncio.Lock()
-        self.excel_path = BOT_DIR / "stats.xlsx"
+        self.db_path = DB_FILE
 
     async def get_data(self):
-        """Get cached data, reloading from disk if the file has changed."""
-        if not self.excel_path.exists():
+        """Get cached data, reloading from database if it has changed."""
+        if not self.db_path.exists():
             return {}
 
         try:
-            current_mtime = self.excel_path.stat().st_mtime
+            current_mtime = self.db_path.stat().st_mtime
             
             # Double-check locking to prevent multiple reloads
             if current_mtime > self.last_mtime:
                 async with self.lock:
                     # Check again inside lock
                     if current_mtime > self.last_mtime:
-                        print(f"[CACHE] File changed. Reloading stats cache...")
-                        self.data = await asyncio.to_thread(self._load_from_excel)
+                        print(f"[CACHE] Database changed. Reloading stats cache...")
+                        self.data = await asyncio.to_thread(self._load_from_database)
                         self.last_mtime = current_mtime
                         print(f"[CACHE] Reload complete. Cached {len(self.data)} users.")
             
@@ -181,48 +190,43 @@ class StatsCache:
             print(f"[CACHE] Error accessing cache: {e}")
             return self.data
 
-    def _load_from_excel(self):
-        with FileLock(LOCK_FILE):
-            wb = load_workbook(str(self.excel_path), read_only=True, data_only=True)
-            cache = {}
-            
-            # Load colors once
-            all_user_data = {}
-            if os.path.exists(USER_COLORS_FILE):
-                try:
-                    with open(USER_COLORS_FILE, 'r') as f: all_user_data = json.load(f)
-                except: pass
+    def _load_from_database(self):
+        """Load all user data from SQLite database."""
+        cache = {}
+        
+        # Load colors once
+        all_user_data = {}
+        if os.path.exists(USER_COLORS_FILE):
+            try:
+                with open(USER_COLORS_FILE, 'r') as f:
+                    all_user_data = json.load(f)
+            except:
+                pass
 
-            for sheet_name in wb.sheetnames:
-                if sheet_name.casefold() == "sheep wars historical data": continue
+        try:
+            # Get all usernames
+            usernames = get_all_usernames()
+            
+            for username in usernames:
                 try:
-                    sheet = wb[sheet_name]
-                    user_cache = {"stats": {}, "meta": {}}
+                    # Get stats with deltas
+                    stats = get_user_stats_with_deltas(username)
                     
-                    # Read all rows efficiently
-                    rows = list(sheet.iter_rows(min_row=1, max_row=200, values_only=True))
+                    # Get metadata
+                    meta_db = get_user_meta(username)
                     
-                    for row in rows:
-                        if not row or not row[0]: continue
-                        stat_name = str(row[0]).lower()
-                        
-                        def get_val(idx):
-                            return _to_number(row[idx]) if idx < len(row) else 0.0
-                            
-                        user_cache["stats"][stat_name] = {
-                            "lifetime": get_val(1),
-                            "session": get_val(2),
-                            "daily": get_val(4),
-                            "yesterday": get_val(6),
-                            "monthly": get_val(8)
-                        }
+                    if not stats:
+                        continue
                     
-                    # Meta
-                    level = int(user_cache["stats"].get('level', {}).get('lifetime', 0))
-                    if level == 0 and 'experience' in user_cache["stats"]:
-                        level = int(user_cache["stats"]['experience']['lifetime'] / 5000)
+                    user_cache = {"stats": stats, "meta": {}}
                     
-                    user_info = all_user_data.get(sheet_name.lower(), {})
+                    # Calculate level from stats if available
+                    level = int(stats.get('level', {}).get('lifetime', 0))
+                    if level == 0 and 'experience' in stats:
+                        level = int(stats['experience']['lifetime'] / 5000)
+                    
+                    # Get user color info
+                    user_info = all_user_data.get(username.lower(), {})
                     if isinstance(user_info, str):
                         ign_color, g_tag, g_hex = user_info, None, "#AAAAAA"
                     else:
@@ -230,16 +234,37 @@ class StatsCache:
                         g_tag = user_info.get('guild_tag')
                         raw_g = str(user_info.get('guild_color', 'GRAY')).upper()
                         g_hex = raw_g if raw_g.startswith('#') else MINECRAFT_NAME_TO_HEX.get(raw_g, "#AAAAAA")
-
-                    user_cache["meta"] = {"level": level, "icon": get_prestige_icon(level), "ign_color": ign_color, "guild_tag": g_tag, "guild_hex": g_hex, "username": sheet_name}
-                    cache[sheet_name] = user_cache
-                except Exception: continue
+                    
+                    # Override with database metadata if available
+                    if meta_db:
+                        if meta_db.get('guild_tag'):
+                            g_tag = meta_db['guild_tag']
+                        if meta_db.get('guild_hex'):
+                            g_hex = meta_db['guild_hex']
+                    
+                    user_cache["meta"] = {
+                        "level": level,
+                        "icon": get_prestige_icon(level),
+                        "ign_color": ign_color,
+                        "guild_tag": g_tag,
+                        "guild_hex": g_hex,
+                        "username": username
+                    }
+                    
+                    cache[username] = user_cache
+                    
+                except Exception as e:
+                    print(f"[CACHE] Error loading user {username}: {e}")
+                    continue
             
-            wb.close()
             return cache
+            
+        except Exception as e:
+            print(f"[CACHE] Error loading from database: {e}")
+            return {}
 
     async def update_cache_entry(self, username: str, processed_stats: dict):
-        """Update a single user's cache entry from api_get.py output without reloading Excel."""
+        """Update a single user's cache entry from api_get.py output without reloading database."""
         async with self.lock:
             # Ensure data dict exists
             if not self.data:
@@ -276,16 +301,16 @@ class StatsCache:
                 print(f"[STREAK] Failed to update streaks for {username}: {e}")
             
             # Update mtime to prevent the next get_data call from reloading
-            if self.excel_path.exists():
-                self.last_mtime = self.excel_path.stat().st_mtime
+            if self.db_path.exists():
+                self.last_mtime = self.db_path.stat().st_mtime
 
     async def refresh(self):
-        """Force reload of cache from Excel."""
+        """Force reload of cache from database."""
         async with self.lock:
             print("[CACHE] Forcing cache refresh...")
-            self.data = await asyncio.to_thread(self._load_from_excel)
-            if self.excel_path.exists():
-                self.last_mtime = self.excel_path.stat().st_mtime
+            self.data = await asyncio.to_thread(self._load_from_database)
+            if self.db_path.exists():
+                self.last_mtime = self.db_path.stat().st_mtime
             print(f"[CACHE] Refresh complete. Cached {len(self.data)} users.")
 
 STATS_CACHE = StatsCache()
@@ -2128,51 +2153,21 @@ def remove_user_color(ign: str) -> bool:
         return False
 
 def delete_user_sheet(ign: str) -> bool:
-    """Delete username's sheet from stats.xlsx"""
-    wb = None
+    """Delete user's data from database."""
     try:
-        excel_file = BOT_DIR / "stats.xlsx"
-        if not excel_file.exists():
+        from db_helper import delete_user, user_exists
+        
+        if not user_exists(ign):
+            print(f"[INFO] User {ign} not found in database")
             return False
         
-        wb = None
-        try:
-            with FileLock(LOCK_FILE):
-                # FAILSAFE: Load workbook with guaranteed cleanup
-                wb = load_workbook(str(excel_file))
-                key = ign.casefold()
-                sheet_to_delete = None
-                
-                for sheet_name in wb.sheetnames:
-                    if sheet_name.casefold() == key:
-                        sheet_to_delete = sheet_name
-                        break
-                
-                if sheet_to_delete:
-                    del wb[sheet_to_delete]
-                    save_success = safe_save_workbook(wb, str(excel_file))
-                    if not save_success:
-                        print(f"[ERROR] Failed to save after deleting sheet for {ign}")
-                        return False
-                    return True
-        finally:
-            if wb is not None:
-                wb.close()
-
-        # Sheet not found
-        return False
+        delete_user(ign)
+        print(f"[INFO] Deleted user {ign} from database")
+        return True
         
     except Exception as e:
-        print(f"[ERROR] Failed to delete sheet for {ign}: {e}")
+        print(f"[ERROR] Failed to delete user {ign}: {e}")
         return False
-        
-    finally:
-        # FAILSAFE: Always close workbook even if an error occurs
-        if wb is not None:
-            try:
-                wb.close()
-            except Exception as close_err:
-                print(f"[WARNING] Error closing workbook: {close_err}")
 
 def render_modern_card(label, value, width, height, color=(255, 255, 255), is_header=False):
     img = Image.new('RGBA', (int(width), int(height)), (0, 0, 0, 0))
@@ -2565,9 +2560,10 @@ def inline_backup_fallback():
     """Inline backup fallback when backup_hourly.py script fails."""
     import shutil
     from datetime import datetime
+    from db_helper import backup_database
     
     try:
-        excel_file = BOT_DIR / "stats.xlsx"
+        db_file = DB_FILE
         backup_dir = BOT_DIR / "backups"
         
         # Try primary backup directory
@@ -2581,29 +2577,21 @@ def inline_backup_fallback():
                 backup_dir.mkdir(exist_ok=True, mode=0o755)
                 print(f"[FALLBACK] Using alternate directory: {backup_dir}")
         
-        if not excel_file.exists():
-            print(f"[FALLBACK] Excel file not found: {excel_file}")
+        if not db_file.exists():
+            print(f"[FALLBACK] Database file not found: {db_file}")
             return False
         
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-00-00")
-        backup_path = backup_dir / f"stats_{timestamp}.xlsx"
+        backup_path = backup_dir / f"stats_{timestamp}.db"
         
         if backup_path.exists():
             print(f"[FALLBACK] Backup already exists: {backup_path.name}")
             return True
         
-        # Try multiple copy methods
-        try:
-            shutil.copy2(excel_file, backup_path)
-        except:
-            try:
-                shutil.copy(excel_file, backup_path)
-            except:
-                with open(excel_file, 'rb') as src:
-                    with open(backup_path, 'wb') as dst:
-                        dst.write(src.read())
+        # Use database helper to backup
+        success = backup_database(backup_path)
         
-        if backup_path.exists():
+        if success and backup_path.exists():
             size = backup_path.stat().st_size
             print(f"[FALLBACK] Backup created: {backup_path.name} ({size:,} bytes)")
             return True
@@ -3360,54 +3348,29 @@ class LeaderboardPeriodSelect(discord.ui.Select):
 
 
 def _load_leaderboard_data_from_excel(metric: str):
-    """Load leaderboard data directly from Excel file instead of cache.
+    """Load leaderboard data from database.
     
     Returns dict with period -> list of (username, value, display_value, is_playtime, level, icon, color, guild_tag, guild_color)
     """
     periods = ["lifetime", "session", "daily", "yesterday", "monthly"]
     result = {p: [] for p in periods}
     
-    EXCEL_FILE = BOT_DIR / "stats.xlsx"
-    if not EXCEL_FILE.exists():
-        return result
-    
     try:
-        with FileLock(LOCK_FILE):
-            wb = openpyxl.load_workbook(EXCEL_FILE, data_only=True)
-            
-            for sheet_name in wb.sheetnames:
-                ws = wb[sheet_name]
-                username = sheet_name
+        # Get all users from database
+        usernames = get_all_usernames()
+        
+        # Load user colors
+        user_colors = load_user_colors()
+        
+        for username in usernames:
+            try:
+                # Get stats with deltas
+                stats_dict = get_user_stats_with_deltas(username)
                 
-                # Read stats from the Excel sheet
-                stats_dict = {}
+                if not stats_dict:
+                    continue
                 
-                # Expected header row is row 1
-                headers = {}
-                for col_idx, cell in enumerate(ws[1], 1):
-                    if cell.value:
-                        headers[col_idx] = str(cell.value).lower()
-                
-                # Read data rows (skip header)
-                for row_idx in range(2, ws.max_row + 1):
-                    stat_name = ws.cell(row_idx, 1).value
-                    if not stat_name:
-                        continue
-                    
-                    stat_name = str(stat_name).lower().strip()
-                    
-                    # Extract period values
-                    # Column B = Lifetime, C = Session Delta, E = Daily Delta, G = Yesterday Delta, I = Monthly Delta
-                    stats_dict[stat_name] = {
-                        "lifetime": ws.cell(row_idx, 2).value or 0,
-                        "session": ws.cell(row_idx, 3).value or 0,
-                        "daily": ws.cell(row_idx, 5).value or 0,
-                        "yesterday": ws.cell(row_idx, 7).value or 0,
-                        "monthly": ws.cell(row_idx, 9).value or 0,
-                    }
-                
-                # Load user metadata
-                user_colors = load_user_colors()
+                # Get metadata
                 user_meta = user_colors.get(username.lower(), {})
                 
                 # Try to get level from stats_dict first
@@ -3429,7 +3392,7 @@ def _load_leaderboard_data_from_excel(metric: str):
                 for period in periods:
                     val = 0
                     
-                    # Map metric names to Excel column patterns
+                    # Map metric names to database columns
                     if metric == "kills":
                         val = stats_dict.get("kills", {}).get(period, 0)
                     elif metric == "deaths":
@@ -3453,11 +3416,11 @@ def _load_leaderboard_data_from_excel(metric: str):
                     elif metric == "coins":
                         val = stats_dict.get("coins", {}).get(period, 0)
                     elif metric == "damage_dealt":
-                        val = stats_dict.get("damage dealt", {}).get(period, 0)
+                        val = stats_dict.get("damage_dealt", {}).get(period, 0)
                     elif metric == "games_played":
-                        val = stats_dict.get("games played", {}).get(period, 0)
+                        val = stats_dict.get("games_played", {}).get(period, 0)
                     elif metric == "sheep_thrown":
-                        val = stats_dict.get("sheep thrown", {}).get(period, 0)
+                        val = stats_dict.get("sheep_thrown", {}).get(period, 0)
                     elif metric == "magic_wool_hit":
                         val = stats_dict.get("magic_wool_hit", {}).get(period, 0)
                     elif metric == "playtime":
@@ -3469,8 +3432,9 @@ def _load_leaderboard_data_from_excel(metric: str):
                     result[period].append((
                         username, float(val), val, is_playtime, level, icon, ign_color, guild_tag, guild_color
                     ))
-            
-            wb.close()
+            except Exception as e:
+                print(f"[LEADERBOARD] Error processing {username}: {e}")
+                continue
             
             # Sort each period by value descending
             for p in result:
@@ -3587,44 +3551,26 @@ def _calculate_ratio_value_from_excel(stats_dict: dict, period: str, metric: str
     return None
 
 def _load_ratio_leaderboard_data_from_excel(metric: str):
-    """Load ratio leaderboard data directly from Excel file."""
+    """Load ratio leaderboard data from database."""
     periods = ["lifetime", "session", "daily", "yesterday", "monthly"]
     result = {p: [] for p in periods}
     
-    EXCEL_FILE = BOT_DIR / "stats.xlsx"
-    if not EXCEL_FILE.exists():
-        return result
-    
     try:
-        with FileLock(LOCK_FILE):
-            wb = openpyxl.load_workbook(EXCEL_FILE, data_only=True)
-            
-            for sheet_name in wb.sheetnames:
-                ws = wb[sheet_name]
-                username = sheet_name
+        # Get all users from database
+        usernames = get_all_usernames()
+        
+        # Load user colors
+        user_colors = load_user_colors()
+        
+        for username in usernames:
+            try:
+                # Get stats with deltas
+                stats_dict = get_user_stats_with_deltas(username)
                 
-                # Read stats from the Excel sheet
-                stats_dict = {}
+                if not stats_dict:
+                    continue
                 
-                # Expected header row is row 1
-                for row_idx in range(2, ws.max_row + 1):
-                    stat_name = ws.cell(row_idx, 1).value
-                    if not stat_name:
-                        continue
-                    
-                    stat_name = str(stat_name).lower().strip()
-                    
-                    # Extract period values
-                    stats_dict[stat_name] = {
-                        "lifetime": ws.cell(row_idx, 2).value or 0,
-                        "session": ws.cell(row_idx, 3).value or 0,
-                        "daily": ws.cell(row_idx, 5).value or 0,
-                        "yesterday": ws.cell(row_idx, 7).value or 0,
-                        "monthly": ws.cell(row_idx, 9).value or 0,
-                    }
-                
-                # Load user metadata
-                user_colors = load_user_colors()
+                # Get metadata
                 user_meta = user_colors.get(username.lower(), {})
                 
                 # Try to get level from stats_dict first
@@ -3649,8 +3595,9 @@ def _load_ratio_leaderboard_data_from_excel(metric: str):
                         result[period].append((
                             username, float(val), val, level, icon, ign_color, guild_tag, guild_color
                         ))
-            
-            wb.close()
+            except Exception as e:
+                print(f"[LEADERBOARD] Error processing {username}: {e}")
+                continue
             
             # Sort each period by value descending
             for p in result:

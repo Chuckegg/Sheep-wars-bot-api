@@ -1,122 +1,134 @@
 #!/usr/bin/env python3
 """
-Transfer stats data from sheep_wars_stats.xlsx to stats.xlsx.
-Matches sheets by name (case-insensitive) and transfers specific cell values.
+Transfer stats data from another stats.db to the current stats.db.
+This is useful for migrating or merging data between databases.
 """
 
-from openpyxl import load_workbook
-import os
+import sqlite3
+from pathlib import Path
+import argparse
 
-# Cell mappings: source cell -> destination cell
-CELL_MAPPINGS = {
-    'E3': 'D15',
-    'E4': 'D7',
-    'E6': 'D14',
-    'E7': 'D10',
-    'E12': 'F15',
-    'E13': 'F7',
-    'E15': 'F14',
-    'E16': 'F10',
-    'E30': 'J15',
-    'E31': 'J7',
-    'E33': 'J14',
-    'E34': 'J10'
-}
 
-def transfer_stats(source_file='sheep_wars_stats.xlsx', dest_file='stats.xlsx'):
+def transfer_stats(source_db='backup_stats.db', dest_db='stats.db'):
     """
-    Transfer stats from source spreadsheet to destination spreadsheet.
+    Transfer stats from source database to destination database.
     
     Args:
-        source_file: Path to sheep_wars_stats.xlsx
-        dest_file: Path to stats.xlsx
+        source_db: Path to source stats.db file
+        dest_db: Path to destination stats.db file
     """
     
+    source_path = Path(source_db)
+    dest_path = Path(dest_db)
+    
     # Check if files exist
-    if not os.path.exists(source_file):
-        print(f"Error: Source file '{source_file}' not found!")
+    if not source_path.exists():
+        print(f"[ERROR] Source file '{source_db}' not found!")
         return False
     
-    if not os.path.exists(dest_file):
-        print(f"Error: Destination file '{dest_file}' not found!")
+    if not dest_path.exists():
+        print(f"[ERROR] Destination file '{dest_db}' not found!")
         return False
-    
-    source_wb = None
-    dest_wb = None
     
     try:
-        # Load both workbooks with failsafe - always close even on error
-        print(f"Loading {source_file}...")
-        source_wb = load_workbook(source_file, data_only=True)
+        # Connect to both databases
+        print(f"[DB] Connecting to source: {source_db}")
+        source_conn = sqlite3.connect(str(source_path))
+        source_conn.row_factory = sqlite3.Row
         
-        print(f"Loading {dest_file}...")
-        dest_wb = load_workbook(dest_file)
+        print(f"[DB] Connecting to destination: {dest_db}")
+        dest_conn = sqlite3.connect(str(dest_path))
         
-        # Create a mapping of lowercase sheet names to actual sheet objects
-        dest_sheets = {sheet.title.lower(): sheet for sheet in dest_wb.worksheets}
+        source_cursor = source_conn.cursor()
+        dest_cursor = dest_conn.cursor()
         
-        # Track processed sheets
-        processed = 0
-        skipped = 0
+        # Get all usernames from source
+        source_cursor.execute('SELECT DISTINCT username FROM user_stats ORDER BY username')
+        usernames = [row[0] for row in source_cursor.fetchall()]
         
-        # Iterate through source sheets
-        for source_sheet in source_wb.worksheets:
-            source_name = source_sheet.title
-            source_name_lower = source_name.lower()
+        print(f"[INFO] Found {len(usernames)} users in source database")
+        
+        transferred_users = 0
+        transferred_stats = 0
+        
+        for username in usernames:
+            print(f"\n[TRANSFER] Processing user: {username}")
             
-            # Find matching destination sheet (case-insensitive)
-            if source_name_lower in dest_sheets:
-                dest_sheet = dest_sheets[source_name_lower]
-                
-                print(f"\nProcessing sheet: '{source_name}' -> '{dest_sheet.title}'")
-                
-                # Transfer each mapped cell
-                transfers = 0
-                for source_cell, dest_cell in CELL_MAPPINGS.items():
-                    source_value = source_sheet[source_cell].value
-                    old_value = dest_sheet[dest_cell].value
-                    
-                    dest_sheet[dest_cell].value = source_value
-                    
-                    print(f"  {source_cell} ({source_value}) -> {dest_cell} (was: {old_value})")
-                    transfers += 1
-                
-                processed += 1
-                print(f"  ✓ Transferred {transfers} cells")
-            else:
-                print(f"\nSkipping sheet '{source_name}' - no matching sheet in destination")
-                skipped += 1
+            # Get all stats for this user from source
+            source_cursor.execute('''
+                SELECT stat_name, lifetime, session, daily, yesterday, monthly
+                FROM user_stats
+                WHERE username = ?
+            ''', (username,))
+            
+            stats = source_cursor.fetchall()
+            
+            # Get metadata for this user from source
+            source_cursor.execute('''
+                SELECT level, icon, ign_color, guild_tag, guild_hex
+                FROM user_meta
+                WHERE username = ?
+            ''', (username,))
+            
+            meta = source_cursor.fetchone()
+            
+            # Insert/update stats in destination
+            for stat in stats:
+                dest_cursor.execute('''
+                    INSERT OR REPLACE INTO user_stats 
+                    (username, stat_name, lifetime, session, daily, yesterday, monthly)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (username, stat[0], stat[1], stat[2], stat[3], stat[4], stat[5]))
+                transferred_stats += 1
+            
+            # Insert/update metadata in destination
+            if meta:
+                dest_cursor.execute('''
+                    INSERT OR REPLACE INTO user_meta 
+                    (username, level, icon, ign_color, guild_tag, guild_hex)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (username, meta[0], meta[1], meta[2], meta[3], meta[4]))
+            
+            print(f"  [OK] Transferred {len(stats)} stats for {username}")
+            transferred_users += 1
         
-        # Save the destination workbook
-        print(f"\nSaving changes to {dest_file}...")
-        dest_wb.save(dest_file)
+        # Commit changes
+        dest_conn.commit()
         
         print(f"\n{'='*60}")
-        print(f"Transfer complete!")
-        print(f"Processed: {processed} sheet(s)")
-        print(f"Skipped: {skipped} sheet(s)")
+        print(f"[SUCCESS] Transfer complete!")
+        print(f"  Users transferred: {transferred_users}")
+        print(f"  Total stats transferred: {transferred_stats}")
         print(f"{'='*60}")
+        
+        # Close connections
+        source_conn.close()
+        dest_conn.close()
         
         return True
         
     except Exception as e:
-        print(f"Error during transfer: {e}")
+        print(f"[ERROR] Transfer failed: {e}")
+        import traceback
+        traceback.print_exc()
         return False
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Transfer stats between SQLite databases")
+    parser.add_argument("-source", "--source-db", default="backup_stats.db",
+                        help="Source database file (default: backup_stats.db)")
+    parser.add_argument("-dest", "--dest-db", default="stats.db",
+                        help="Destination database file (default: stats.db)")
+    args = parser.parse_args()
     
-    finally:
-        # FAILSAFE: Always close workbooks even if an error occurs
-        if source_wb is not None:
-            try:
-                source_wb.close()
-                print("[CLEANUP] Source workbook closed")
-            except Exception as close_err:
-                print(f"[WARNING] Error closing source workbook: {close_err}")
-        if dest_wb is not None:
-            try:
-                dest_wb.close()
-                print("[CLEANUP] Destination workbook closed")
-            except Exception as close_err:
-                print(f"[WARNING] Error closing destination workbook: {close_err}")
+    success = transfer_stats(args.source_db, args.dest_db)
+    
+    if success:
+        print("\n[SUCCESS] Transfer completed successfully")
+    else:
+        print("\n[FAILURE] Transfer failed")
+
 
 if __name__ == "__main__":
-    transfer_stats()
+    main()

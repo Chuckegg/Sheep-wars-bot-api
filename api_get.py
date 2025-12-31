@@ -1,117 +1,20 @@
 import os
 import argparse
-import time
 import json
-import shutil
 from pathlib import Path
 from typing import Dict, Optional
 import requests
-from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
+
+# Import database helper
+from db_helper import (
+    init_database,
+    update_user_stats,
+    update_user_meta,
+    get_user_stats_with_deltas
+)
 
 SCRIPT_DIR = Path(__file__).parent.absolute()
-EXCEL_FILE = str(SCRIPT_DIR / "stats.xlsx")
-LOCK_FILE = str(SCRIPT_DIR / "stats.xlsx.lock")
-STAT_ORDER = ["Kills", "Deaths", "K/D", "Wins", "Losses", "W/L"]
 
-class FileLock:
-    """Simple file-based lock to prevent concurrent Excel writes."""
-    def __init__(self, lock_file, timeout=20, delay=0.1):
-        self.lock_file = lock_file
-        self.timeout = timeout
-        self.delay = delay
-        self._fd = None
-
-    def __enter__(self):
-        start_time = time.time()
-        while True:
-            try:
-                # Exclusive creation of lock file
-                self._fd = os.open(self.lock_file, os.O_CREAT | os.O_EXCL | os.O_RDWR)
-                break
-            except FileExistsError:
-                # Check for stale lock (older than 60 seconds)
-                try:
-                    if os.path.exists(self.lock_file) and time.time() - os.stat(self.lock_file).st_mtime > 300:
-                        try:
-                            os.remove(self.lock_file)
-                        except OSError:
-                            pass
-                        continue
-                except OSError:
-                    pass
-                if time.time() - start_time >= self.timeout:
-                    raise TimeoutError(f"Could not acquire lock on {self.lock_file}")
-                time.sleep(self.delay)
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self._fd is not None:
-            os.close(self._fd)
-            try:
-                os.remove(self.lock_file)
-            except OSError:
-                pass
-
-def safe_save_workbook(wb, filepath: str) -> bool:
-    """Safely save a workbook using atomic write to prevent corruption.
-    
-    Writes to a temp file first, then atomically replaces the target file.
-    
-    Args:
-        wb: The openpyxl Workbook object to save
-        filepath: Path to the Excel file
-        
-    Returns:
-        bool: True if save succeeded, False otherwise
-    """
-    temp_path = str(filepath) + ".tmp"
-    backup_path = str(filepath) + ".backup"
-    
-    try:
-        # 1. Save to temporary file first (if this fails, original is untouched)
-        wb.save(temp_path)
-        
-        # 2. Create backup of existing file just in case
-        if os.path.exists(filepath):
-            try:
-                shutil.copy2(filepath, backup_path)
-            except Exception as backup_err:
-                print(f"[WARNING] Failed to create backup: {backup_err}")
-        
-        # 3. Atomic replace: this is the critical step that prevents corruption
-        # os.replace is atomic on POSIX and Windows (Python 3.3+)
-        os.replace(temp_path, filepath)
-        print(f"[SAVE] Successfully saved: {filepath}")
-        
-        # 4. Cleanup backup
-        if os.path.exists(backup_path):
-            try:
-                os.remove(backup_path)
-            except Exception:
-                pass  # Not critical if backup removal fails
-        
-        return True
-        
-    except Exception as save_err:
-        print(f"[ERROR] Failed to save workbook: {save_err}")
-        # Clean up temp file
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except:
-                pass
-        
-        return False
-        
-    finally:
-        # Always try to close the workbook
-        try:
-            wb.close()
-            print(f"[CLEANUP] Workbook closed")
-        except Exception as close_err:
-            print(f"[WARNING] Error closing workbook: {close_err}")
 
 def read_api_key_file() -> Optional[str]:
     """Read API key from API_KEY.txt next to the script, if present."""
@@ -125,6 +28,7 @@ def read_api_key_file() -> Optional[str]:
             # ignore read errors and fall back to other sources
             pass
     return None
+
 
 # -------- Wool Games level calculation --------
 
@@ -168,6 +72,7 @@ def experience_to_level(exp: float) -> int:
     # Convert to 1-based display level (Hypixel shows levels starting at 1)
     return prestige_count * 100 + level_in_prestige + 1
 
+
 # -------- API helpers --------
 
 def get_uuid(username: str) -> tuple[str, str]:
@@ -181,6 +86,7 @@ def get_uuid(username: str) -> tuple[str, str]:
     data = r.json()
     return data["id"], data.get("name", username)
 
+
 def get_hypixel_player(uuid: str, api_key: str) -> Dict:
     r = requests.get(
         "https://api.hypixel.net/v2/player",
@@ -190,6 +96,7 @@ def get_hypixel_player(uuid: str, api_key: str) -> Dict:
     )
     r.raise_for_status()
     return r.json()
+
 
 def get_hypixel_guild(uuid: str, api_key: str) -> Dict:
     """Fetch guild information for a player from Hypixel API."""
@@ -201,6 +108,7 @@ def get_hypixel_guild(uuid: str, api_key: str) -> Dict:
     )
     r.raise_for_status()
     return r.json()
+
 
 def extract_guild_info(guild_json: Dict) -> tuple[Optional[str], Optional[str]]:
     """Extract guild tag and tag color from Hypixel guild API response.
@@ -218,6 +126,7 @@ def extract_guild_info(guild_json: Dict) -> tuple[Optional[str], Optional[str]]:
     tag_color = guild.get("tagColor")
     
     return tag, tag_color
+
 
 def extract_player_rank(player_json: Dict) -> Optional[str]:
     """Extract the player's rank from Hypixel API response.
@@ -247,6 +156,7 @@ def extract_player_rank(player_json: Dict) -> Optional[str]:
         return package
     
     return None
+
 
 def extract_wool_games_flat(player_json: Dict) -> Dict:
     """Extract Wool Games data and flatten into a single stats dict.
@@ -295,146 +205,6 @@ def extract_wool_games_flat(player_json: Dict) -> Dict:
         flat["playtime"] = wool.get("playtime")
 
     return flat
-
-# -------- Excel helpers (horizontal layout) --------
-
-def ensure_workbook(path: str):
-    """Load workbook or create new one if file doesn't exist.
-    
-    If file is temporarily locked or corrupted due to concurrent access,
-    retry a few times before giving up.
-    
-    IMPORTANT: Caller is responsible for closing the workbook in a finally block.
-    """
-    max_retries = 3
-    retry_delay = 0.5  # seconds
-    
-    for attempt in range(max_retries):
-        if os.path.exists(path):
-            try:
-                # FAILSAFE: Load with error handling - caller must close in finally block
-                return load_workbook(path)
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    # Might be temporarily locked by another process, wait and retry
-                    print(f"[WARNING] Failed to load Excel file (attempt {attempt + 1}/{max_retries}): {e}")
-                    print(f"[INFO] Retrying in {retry_delay} seconds...")
-                    import time
-                    time.sleep(retry_delay)
-                    continue
-                else:
-                    # Last attempt failed, file is truly corrupted
-                    print(f"[ERROR] Failed to load Excel file after {max_retries} attempts: {e}")
-                    print(f"[ERROR] File appears to be corrupted. Please restore from backup.")
-                    print(f"[ERROR] NOT creating new workbook to avoid data loss.")
-                    raise RuntimeError(f"Excel file is corrupted and cannot be opened: {e}")
-        else:
-            return Workbook()
-    
-    # Should never reach here
-    return Workbook()
-
-
-def title_and_headers(ws, start_col: int, title: str, stat_list):
-    # Determine how many columns the block spans: 4 columns per stat (Stat, Value, Snapshot, Value)
-    block_cols = len(stat_list) * 4
-    # Title row = 1, merged across the block
-    from openpyxl.utils import get_column_letter
-    start_letter = get_column_letter(start_col)
-    end_letter = get_column_letter(start_col + block_cols - 1)
-    ws.merge_cells(f"{start_letter}1:{end_letter}1")
-    ws.cell(row=1, column=start_col).value = title
-    ws.cell(row=1, column=start_col).alignment = Alignment(horizontal="center", vertical="center")
-    ws.cell(row=1, column=start_col).font = Font(bold=True)
-
-    # Row 2: repeated headers for each stat group
-    header_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
-    border = Border(left=Side(style="thin"), right=Side(style="thin"), top=Side(style="thin"), bottom=Side(style="thin"))
-
-    col = start_col
-    for stat in stat_list:
-        ws.cell(row=2, column=col, value=stat).font = Font(bold=True)
-        ws.cell(row=2, column=col).alignment = Alignment(horizontal="center")
-        ws.cell(row=2, column=col).fill = header_fill
-        ws.cell(row=2, column=col).border = border
-
-        ws.cell(row=2, column=col + 1, value="Value").font = Font(bold=True)
-        ws.cell(row=2, column=col + 1).alignment = Alignment(horizontal="center")
-        ws.cell(row=2, column=col + 1).fill = header_fill
-        ws.cell(row=2, column=col + 1).border = border
-
-        ws.cell(row=2, column=col + 2, value="Snapshot").font = Font(bold=True)
-        ws.cell(row=2, column=col + 2).alignment = Alignment(horizontal="center")
-        ws.cell(row=2, column=col + 2).fill = header_fill
-        ws.cell(row=2, column=col + 2).border = border
-
-        ws.cell(row=2, column=col + 3, value="Value").font = Font(bold=True)
-        ws.cell(row=2, column=col + 3).alignment = Alignment(horizontal="center")
-        ws.cell(row=2, column=col + 3).fill = header_fill
-        ws.cell(row=2, column=col + 3).border = border
-
-        col += 4
-
-
-def write_block(ws, start_col: int, current_stats: Dict[str, float], snapshot_row: int):
-    # Writes a single data row (row 3) for the block.
-    # If snapshot columns (row 3, col+2/col+3) are empty, initialize snapshot with current stats.
-    from openpyxl.utils import get_column_letter
-    border = Border(left=Side(style="thin"), right=Side(style="thin"), top=Side(style="thin"), bottom=Side(style="thin"))
-    align = Alignment(horizontal="center")
-
-    col = start_col
-    for stat in STAT_ORDER:
-        # Current value (for Session/Daily, this will be filled by caller as the delta)
-        curr_val = current_stats.get(stat, 0)
-        ws.cell(row=3, column=col, value=stat).alignment = align
-        ws.cell(row=3, column=col).border = border
-
-        ws.cell(row=3, column=col + 1, value=curr_val).alignment = align
-        ws.cell(row=3, column=col + 1).border = border
-
-        snap_label_cell = ws.cell(row=snapshot_row, column=col + 2)
-        snap_value_cell = ws.cell(row=snapshot_row, column=col + 3)
-        # initialize snapshot if empty
-        if snap_label_cell.value is None and snap_value_cell.value is None:
-            snap_label_cell.value = "Snapshot"
-            snap_value_cell.value = current_stats.get(stat, 0)
-        snap_label_cell.alignment = align
-        snap_value_cell.alignment = align
-        snap_label_cell.border = border
-        snap_value_cell.border = border
-
-        col += 4
-
-
-def compute_deltas(current_all_time: Dict[str, float], snapshot_values: Dict[str, float]) -> Dict[str, float]:
-    # Deltas for counts; ratios based on delta counts
-    kills_delta = (current_all_time.get("Kills", 0) or 0) - (snapshot_values.get("Kills", 0) or 0)
-    deaths_delta = (current_all_time.get("Deaths", 0) or 0) - (snapshot_values.get("Deaths", 0) or 0)
-    wins_delta = (current_all_time.get("Wins", 0) or 0) - (snapshot_values.get("Wins", 0) or 0)
-    losses_delta = (current_all_time.get("Losses", 0) or 0) - (snapshot_values.get("Losses", 0) or 0)
-    # Ratios from deltas
-    kd = round(kills_delta / deaths_delta, 2) if deaths_delta else float(kills_delta)
-    wl = round(wins_delta / losses_delta, 2) if losses_delta else float(wins_delta)
-    return {
-        "Kills": kills_delta,
-        "Deaths": deaths_delta,
-        "K/D": kd,
-        "Wins": wins_delta,
-        "Losses": losses_delta,
-        "W/L": wl,
-    }
-
-
-def read_snapshot_row(ws, start_col: int) -> Dict[str, float]:
-    # Reads the snapshot 'Value' from row 3, col+3 for each stat.
-    vals: Dict[str, float] = {}
-    col = start_col
-    for stat in STAT_ORDER:
-        val = ws.cell(row=3, column=col + 3).value
-        vals[stat] = float(val or 0)
-        col += 4
-    return vals
 
 
 def get_rank_color(rank: Optional[str]) -> str:
@@ -486,10 +256,7 @@ def save_user_color_and_rank(username: str, rank: Optional[str], guild_tag: Opti
     if username_key in color_data:
         # User exists - only update rank and guild info, preserve their color
         existing_entry = color_data[username_key]
-        try:
-            print(f"[DEBUG] User {username} already exists with data: {existing_entry}")
-        except UnicodeEncodeError:
-            print(f"[DEBUG] User {username} already exists with data (unicode display issue)")
+        print(f"[DEBUG] User {username} already exists with data: {existing_entry}")
         
         if isinstance(existing_entry, str):
             # Old format (just color string), convert to new format
@@ -503,20 +270,14 @@ def save_user_color_and_rank(username: str, rank: Optional[str], guild_tag: Opti
         else:
             # New format, update rank and guild info, preserve color
             old_color = existing_entry.get("color")
-            try:
-                print(f"[DEBUG] Preserving existing color {old_color}, updating rank to {rank}, guild: {guild_tag}")
-            except UnicodeEncodeError:
-                print(f"[DEBUG] Preserving existing color {old_color}, updating rank to {rank}, guild: (unicode display issue)")
+            print(f"[DEBUG] Preserving existing color {old_color}, updating rank to {rank}, guild: {guild_tag}")
             color_data[username_key]["rank"] = rank
             color_data[username_key]["guild_tag"] = guild_tag
             color_data[username_key]["guild_color"] = guild_color
     else:
         # NEW USER - assign color based on rank automatically
         auto_color = get_rank_color(rank)
-        try:
-            print(f"[DEBUG] NEW USER {username} - assigning auto color {auto_color} for rank {rank}, guild: {guild_tag}")
-        except UnicodeEncodeError:
-            print(f"[DEBUG] NEW USER {username} - assigning auto color {auto_color} for rank {rank}, guild: (unicode display issue)")
+        print(f"[DEBUG] NEW USER {username} - assigning auto color {auto_color} for rank {rank}, guild: {guild_tag}")
         color_data[username_key] = {
             "color": auto_color, 
             "rank": rank,
@@ -525,18 +286,33 @@ def save_user_color_and_rank(username: str, rank: Optional[str], guild_tag: Opti
         }
     
     # Save back to file
-    try:
-        print(f"[DEBUG] Saving to file: {username_key} -> {color_data[username_key]}")
-    except UnicodeEncodeError:
-        print(f"[DEBUG] Saving to file: {username_key} (unicode display issue)")
+    print(f"[DEBUG] Saving to file: {username_key} -> {color_data[username_key]}")
     with open(colors_file, 'w', encoding='utf-8') as f:
         json.dump(color_data, f, indent=2, ensure_ascii=False)
 
 
-def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | None = None):
+def api_update_database(username: str, api_key: str, snapshot_sections: set[str] | None = None):
+    """Update user stats in database from Hypixel API.
+    
+    Args:
+        username: Minecraft username
+        api_key: Hypixel API key
+        snapshot_sections: Set of periods to snapshot ("session", "daily", "yesterday", "monthly")
+        
+    Returns:
+        Dict with update results
+    """
     try:
+        # Ensure database exists
+        init_database()
+        
+        # Get UUID and properly cased username
         uuid, proper_username = get_uuid(username)
+        print(f"[API] Fetching data for {proper_username} (UUID: {uuid})")
+        
+        # Get player data from Hypixel
         data = get_hypixel_player(uuid, api_key)
+        
     except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
         should_fallback = False
         if isinstance(e, requests.exceptions.HTTPError) and e.response is not None:
@@ -551,90 +327,39 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
             should_fallback = True
 
         if should_fallback:
-            snapshots_written = False
-            wb = None
-            with FileLock(LOCK_FILE):
-                try:
-                    # FAILSAFE: Load workbook with guaranteed cleanup
-                    wb = ensure_workbook(EXCEL_FILE)
-
-                    # Find the user's sheet case-insensitively
-                    target_sheet = None
-                    key = username.casefold()
-                    for sheet_name in wb.sheetnames:
-                        if sheet_name.casefold() == key:
-                            target_sheet = wb[sheet_name]
-                            break
-
-                    # Verify single-table layout headers
-                    def is_single_table_layout(ws) -> bool:
-                        expected = [
-                            "Stat",
-                            "All-time",
-                            "Session Delta",
-                            "Session Snapshot",
-                            "Daily Delta",
-                            "Daily Snapshot",
-                            "Yesterday Delta",
-                            "Yesterday Snapshot",
-                            "Monthly Delta",
-                            "Monthly Snapshot",
-                        ]
-                        for i, title in enumerate(expected, start=1):
-                            cell_val = (ws.cell(row=1, column=i).value or "").strip()
-                            if cell_val != title:
-                                return False
-                        return True
-
-                    # Write snapshots from existing All-time values and zero deltas
-                    if target_sheet and is_single_table_layout(target_sheet) and snapshot_sections:
-                        at_col = 2
-                        sess_delta_col, sess_snap_col = 3, 4
-                        daily_delta_col, daily_snap_col = 5, 6
-                        yest_delta_col, yest_snap_col = 7, 8
-                        mon_delta_col, mon_snap_col = 9, 10
-
-                        for row in range(2, target_sheet.max_row + 1):
-                            cur = target_sheet.cell(row=row, column=at_col).value or 0
-                            if "session" in snapshot_sections:
-                                target_sheet.cell(row=row, column=sess_snap_col, value=cur)
-                                target_sheet.cell(row=row, column=sess_delta_col, value=0)
-                            if "daily" in snapshot_sections:
-                                target_sheet.cell(row=row, column=daily_snap_col, value=cur)
-                                target_sheet.cell(row=row, column=daily_delta_col, value=0)
-                            if "yesterday" in snapshot_sections:
-                                target_sheet.cell(row=row, column=yest_snap_col, value=cur)
-                                target_sheet.cell(row=row, column=yest_delta_col, value=0)
-                            if "monthly" in snapshot_sections:
-                                target_sheet.cell(row=row, column=mon_snap_col, value=cur)
-                                target_sheet.cell(row=row, column=mon_delta_col, value=0)
-
-                        if not safe_save_workbook(wb, EXCEL_FILE):
-                            print("[ERROR] Snapshot fallback save failed.")
-                        else:
-                            snapshots_written = True
-                    else:
-                        print("[INFO] No suitable sheet/layout found for snapshot fallback.")
-
-                except Exception as fe:
-                    print(f"[ERROR] Snapshot fallback failed: {fe}")
-                    
-                finally:
-                    # FAILSAFE: Always close workbook even if an error occurs
-                    if wb is not None:
-                        try:
-                            wb.close()
-                            print("[CLEANUP] Fallback workbook closed")
-                        except Exception as close_err:
-                            print(f"[WARNING] Error closing fallback workbook: {close_err}")
-
-            # Return structured result indicating fallback outcome
-            return {
-                "skipped": True,
-                "reason": "rate_limited",
-                "username": username,
-                "snapshots_written": snapshots_written,
-            }
+            # For rate limiting: just take snapshots without updating lifetime values
+            print("[INFO] Taking snapshots from existing database values")
+            try:
+                # Get existing stats
+                existing_stats = get_user_stats_with_deltas(username)
+                if existing_stats:
+                    # Extract just lifetime values
+                    lifetime_stats = {stat: data['lifetime'] for stat, data in existing_stats.items()}
+                    # Update with snapshots
+                    update_user_stats(username, lifetime_stats, snapshot_sections)
+                    print(f"[FALLBACK] Snapshots taken for {username}")
+                    return {
+                        "skipped": True,
+                        "reason": "rate_limited",
+                        "username": username,
+                        "snapshots_written": True,
+                    }
+                else:
+                    print(f"[ERROR] No existing data found for {username}")
+                    return {
+                        "skipped": True,
+                        "reason": "rate_limited",
+                        "username": username,
+                        "snapshots_written": False,
+                    }
+            except Exception as fe:
+                print(f"[ERROR] Snapshot fallback failed: {fe}")
+                return {
+                    "skipped": True,
+                    "reason": "rate_limited",
+                    "username": username,
+                    "snapshots_written": False,
+                }
         else:
             # Non-recoverable error (e.g. 404)
             print(f"[ERROR] API request failed for {username}: {e}")
@@ -646,9 +371,12 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
                 "snapshots_written": False,
             }
     
+    # Extract Wool Games stats
     current = extract_wool_games_flat(data)
     if not current:
         raise RuntimeError(f"No Wool Games -> Sheep Wars stats for {proper_username}")
+
+    print(f"[API] Extracted {len(current)} stats for {proper_username}")
 
     # Fetch guild information
     print(f"[DEBUG] Fetching guild information for {proper_username} (UUID: {uuid})")
@@ -660,22 +388,16 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
             json.dump(guild_data, f, indent=2)
         print(f"[DEBUG] Guild data saved to guild_info.json")
         guild_tag, guild_color = extract_guild_info(guild_data)
-        try:
-            print(f"[DEBUG] Extracted guild tag: {guild_tag}, color: {guild_color}")
-        except UnicodeEncodeError:
-            print(f"[DEBUG] Extracted guild tag (unicode display issue), color: {guild_color}")
+        print(f"[DEBUG] Extracted guild tag: {guild_tag}, color: {guild_color}")
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 429:
             print(f"[DEBUG] Rate limited (429) fetching guild data for {proper_username}. Using cached data.")
-            guild_data = None
             guild_tag, guild_color = None, None
         else:
             print(f"[DEBUG] Failed to fetch guild data: {e}")
-            guild_data = None
             guild_tag, guild_color = None, None
     except Exception as e:
         print(f"[DEBUG] Failed to fetch guild data: {e}")
-        guild_data = None
         guild_tag, guild_color = None, None
 
     # Extract and save player rank and guild info to user_colors.json
@@ -683,249 +405,37 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
     print(f"[DEBUG] Extracted rank for {proper_username}: {rank}")
     save_user_color_and_rank(proper_username, rank, guild_tag, guild_color)
 
-    # Open workbook (create if missing) and create/select player's sheet
-    # FAILSAFE: Workbook is guaranteed to be closed in the finally block below
-    with FileLock(LOCK_FILE):
-        wb = ensure_workbook(EXCEL_FILE)
-        
-        try:
-            # Detect if existing sheet already uses the single-table layout; if not, rebuild it.
-            def is_single_table_layout(ws) -> bool:
-                expected = [
-                    "Stat",
-                    "All-time",
-                    "Session Delta",
-                    "Session Snapshot",
-                    "Daily Delta",
-                    "Daily Snapshot",
-                    "Yesterday Delta",
-                    "Yesterday Snapshot",
-                    "Monthly Delta",
-                    "Monthly Snapshot",
-                ]
-                for i, title in enumerate(expected, start=1):
-                    cell_val = ws.cell(row=1, column=i).value
-                    if (cell_val or "").strip() != title:
-                        return False
-                return True
-
-            if proper_username in wb.sheetnames:
-                ws = wb[proper_username]
-                # If not the new layout, clear and rebuild
-                if not is_single_table_layout(ws):
-                    ws.delete_rows(1, ws.max_row)
-                    ws.delete_cols(1, ws.max_column)
-                    new_sheet = True
-                else:
-                    new_sheet = False
-            else:
-                ws = wb.create_sheet(proper_username)
-                new_sheet = True
-
-            # Build ordered key list: preferred first, then any remaining keys
-            preferred = [
-                "available_layers",
-                "experience",
-                "level",
-                "coins",
-                "damage_dealt",
-                "deaths",
-                "deaths_explosive",
-                "games_played",
-                "losses",
-                "sheep_thrown",
-                "deaths_bow",
-                "deaths_void",
-                "wins",
-                "kills",
-                "kills_void",
-                "magic_wool_hit",
-                "kills_explosive",
-                "kills_melee",
-                "deaths_melee",
-                "kills_bow",
-                "playtime",
-            ]
-            ordered_keys = []
-            seen = set()
-            for k in preferred:
-                if k in current and k not in seen:
-                    ordered_keys.append(k)
-                    seen.add(k)
-            for k in sorted(current.keys()):
-                if k not in seen:
-                    ordered_keys.append(k)
-                    seen.add(k)
-
-            # Single table layout (no gaps):
-            # A: Stat label, B: All-time, C: Session Delta, D: Session Snapshot,
-            # E: Daily Delta, F: Daily Snapshot, G: Yesterday Delta, H: Yesterday Snapshot,
-            # I: Monthly Delta, J: Monthly Snapshot
-            label_col = 1
-            at_col = 2
-            sess_delta_col, sess_snap_col = 3, 4
-            daily_delta_col, daily_snap_col = 5, 6
-            yest_delta_col, yest_snap_col = 7, 8
-            mon_delta_col, mon_snap_col = 9, 10
-
-            # Headers row
-            headers = [
-                (label_col, "Stat"),
-                (at_col, "All-time"),
-                (sess_delta_col, "Session Delta"),
-                (sess_snap_col, "Session Snapshot"),
-                (daily_delta_col, "Daily Delta"),
-                (daily_snap_col, "Daily Snapshot"),
-                (yest_delta_col, "Yesterday Delta"),
-                (yest_snap_col, "Yesterday Snapshot"),
-                (mon_delta_col, "Monthly Delta"),
-                (mon_snap_col, "Monthly Snapshot"),
-            ]
-            for col, title in headers:
-                c = ws.cell(row=1, column=col)
-                c.value = title
-                c.font = Font(bold=True)
-                c.alignment = Alignment(horizontal="center")
-
-            processed_stats = {}
-
-            # Populate rows
-            for idx, key in enumerate(ordered_keys):
-                row = 2 + idx
-                # Label
-                ws.cell(row=row, column=label_col, value=key)
-                # All-time value
-                ws.cell(row=row, column=at_col, value=current.get(key))
-                # Reserve delta and snapshot cells. We'll compute numeric deltas after
-                # snapshot columns are optionally updated below so deltas reflect
-                # the correct (current - snapshot_before_update) values or zero when
-                # snapshot is set to currently set to empty
-                # leave delta cells empty for now
-                ws.cell(row=row, column=sess_delta_col, value=None)
-                ws.cell(row=row, column=daily_delta_col, value=None)
-                ws.cell(row=row, column=yest_delta_col, value=None)
-                ws.cell(row=row, column=mon_delta_col, value=None)
-
-            # If snapshot flags provided, write snapshot values into appropriate snapshot columns
-            snapshot_sections = snapshot_sections or set()
-            def write_snapshot_column(col_idx: int):
-                for idx, key in enumerate(ordered_keys):
-                    row = 2 + idx
-                    ws.cell(row=row, column=col_idx, value=current.get(key))
-
-            if "session" in snapshot_sections:
-                write_snapshot_column(sess_snap_col)
-            if "daily" in snapshot_sections:
-                write_snapshot_column(daily_snap_col)
-            if "yesterday" in snapshot_sections:
-                write_snapshot_column(yest_snap_col)
-            if "monthly" in snapshot_sections:
-                write_snapshot_column(mon_snap_col)
-
-            # Compute numeric deltas for each period (current - snapshot). Treat missing
-            # snapshot values as 0. This ensures the bot (which reads cell values)
-            # sees numeric deltas rather than formula strings.
-            
-            for idx, key in enumerate(ordered_keys):
-                row = 2 + idx
-                cur = current.get(key) or 0
-                # Session delta
-                snap_val = ws.cell(row=row, column=sess_snap_col).value
-                try:
-                    snap_val = float(snap_val or 0)
-                except Exception:
-                    # remove commas and try
-                    try:
-                        snap_val = float(str(snap_val).replace(",", ""))
-                    except Exception:
-                        snap_val = 0
-                sess_delta = cur - snap_val
-                ws.cell(row=row, column=sess_delta_col, value=sess_delta)
-                # Daily delta
-                snap_val = ws.cell(row=row, column=daily_snap_col).value
-                try:
-                    snap_val = float(snap_val or 0)
-                except Exception:
-                    try:
-                        snap_val = float(str(snap_val).replace(",", ""))
-                    except Exception:
-                        snap_val = 0
-                daily_delta = cur - snap_val
-                ws.cell(row=row, column=daily_delta_col, value=daily_delta)
-                # Yesterday delta
-                snap_val = ws.cell(row=row, column=yest_snap_col).value
-                try:
-                    snap_val = float(snap_val or 0)
-                except Exception:
-                    try:
-                        snap_val = float(str(snap_val).replace(",", ""))
-                    except Exception:
-                        snap_val = 0
-                yest_delta = cur - snap_val
-                ws.cell(row=row, column=yest_delta_col, value=yest_delta)
-                # Monthly delta
-                snap_val = ws.cell(row=row, column=mon_snap_col).value
-                try:
-                    snap_val = float(snap_val or 0)
-                except Exception:
-                    try:
-                        snap_val = float(str(snap_val).replace(",", ""))
-                    except Exception:
-                        snap_val = 0
-                mon_delta = cur - snap_val
-                ws.cell(row=row, column=mon_delta_col, value=mon_delta)
-
-                processed_stats[key.lower()] = {
-                    "lifetime": cur,
-                    "session": sess_delta,
-                    "daily": daily_delta,
-                    "yesterday": yest_delta,
-                    "monthly": mon_delta
-                }
-
-            # Force Excel to recalculate formulas on load so deltas show correctly
-            try:
-                wb.calculation_properties.fullCalcOnLoad = True
-            except Exception:
-                # older openpyxl versions may not have calculation_properties
-                pass
-
-            # Use safe save with backup and error recovery
-            save_success = safe_save_workbook(wb, EXCEL_FILE)
-            if not save_success:
-                raise RuntimeError("Failed to save Excel file. Check logs for details.")
-            
-            return {
-                "uuid": uuid,
-                "stats": current,
-                "processed_stats": processed_stats,
-                "excel": EXCEL_FILE,
-                "username": proper_username
-            }
-        
-        except Exception as e:
-            # Log the error and re-raise
-            print(f"[ERROR] Exception occurred during Excel update: {e}")
-            raise
-            
-        finally:
-            # FAILSAFE: Always close the workbook even if an error occurs
-            if wb is not None:
-                try:
-                    wb.close()
-                    print("[CLEANUP] Workbook closed")
-                except Exception as close_err:
-                    print(f"[WARNING] Error closing workbook: {close_err}")
+    # Update database with stats
+    print(f"[DB] Updating stats for {proper_username}")
+    update_user_stats(proper_username, current, snapshot_sections)
+    
+    # Update metadata
+    level = int(current.get('level', 0))
+    # Calculate prestige icon (placeholder - you can add icon logic here)
+    icon = ""
+    update_user_meta(proper_username, level, icon, None, guild_tag, guild_color)
+    
+    # Get processed stats with deltas for return value
+    processed_stats = get_user_stats_with_deltas(proper_username)
+    
+    print(f"[DB] Successfully updated {proper_username}")
+    
+    return {
+        "uuid": uuid,
+        "stats": current,
+        "processed_stats": processed_stats,
+        "database": "stats.db",
+        "username": proper_username
+    }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="API-based Wool Games stats to Excel (horizontal)")
+    parser = argparse.ArgumentParser(description="API-based Wool Games stats to SQLite database")
     parser.add_argument("-ign", "--username", required=True, help="Minecraft IGN")
-    # API key must be provided via API_KEY.txt; no CLI/env flag
-    parser.add_argument("-session", action="store_true", help="Write snapshot values into Session block")
-    parser.add_argument("-daily", action="store_true", help="Write snapshot values into Daily block")
-    parser.add_argument("-yesterday", action="store_true", help="Write snapshot values into Yesterday block")
-    parser.add_argument("-monthly", action="store_true", help="Write snapshot values into Monthly block")
+    parser.add_argument("-session", action="store_true", help="Take session snapshot")
+    parser.add_argument("-daily", action="store_true", help="Take daily snapshot")
+    parser.add_argument("-yesterday", action="store_true", help="Take yesterday snapshot")
+    parser.add_argument("-monthly", action="store_true", help="Take monthly snapshot")
     args = parser.parse_args()
 
     # Only use the API key from API_KEY.txt (no CLI/env/default fallback)
@@ -934,6 +444,7 @@ def main():
         raise RuntimeError(
             "Missing API key: create API_KEY.txt next to api_get.py containing your Hypixel API key"
         )
+    
     sections = set()
     if args.session:
         sections.add("session")
@@ -944,8 +455,9 @@ def main():
     if args.monthly:
         sections.add("monthly")
 
-    res = api_update_sheet(args.username, api_key, snapshot_sections=sections)
+    res = api_update_database(args.username, api_key, snapshot_sections=sections)
     print(json.dumps(res, default=str))
+
 
 if __name__ == "__main__":
     main()
