@@ -2,197 +2,18 @@ import os
 import subprocess
 import sys
 import argparse
-import shutil
-import time
 from pathlib import Path
-from openpyxl import load_workbook
+
+# Import database helper
+from db_helper import rotate_daily_to_yesterday, get_tracked_users
 
 SCRIPT_DIR = Path(__file__).parent.absolute()
-TRACKED_FILE = str(SCRIPT_DIR / "tracked_users.txt")
-EXCEL_FILE = str(SCRIPT_DIR / "stats.xlsx")
-LOCK_FILE = str(SCRIPT_DIR / "stats.xlsx.lock")
-
-class FileLock:
-    """Simple file-based lock to prevent concurrent Excel writes."""
-    def __init__(self, lock_file, timeout=20, delay=0.1):
-        self.lock_file = lock_file
-        self.timeout = timeout
-        self.delay = delay
-        self._fd = None
-
-    def __enter__(self):
-        start_time = time.time()
-        while True:
-            try:
-                # Exclusive creation of lock file
-                self._fd = os.open(self.lock_file, os.O_CREAT | os.O_EXCL | os.O_RDWR)
-                break
-            except FileExistsError:
-                # Check for stale lock (older than 60 seconds)
-                try:
-                    if os.path.exists(self.lock_file) and time.time() - os.stat(self.lock_file).st_mtime > 300:
-                        try:
-                            os.remove(self.lock_file)
-                        except OSError:
-                            pass
-                        continue
-                except OSError:
-                    pass
-                if time.time() - start_time >= self.timeout:
-                    raise TimeoutError(f"Could not acquire lock on {self.lock_file}")
-                time.sleep(self.delay)
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self._fd is not None:
-            os.close(self._fd)
-            try:
-                os.remove(self.lock_file)
-            except OSError:
-                pass
-
-
-def safe_save_workbook(wb, filepath: str) -> bool:
-    """Safely save a workbook using atomic write to prevent corruption.
-    
-    Writes to a temp file first, then atomically replaces the target file.
-    
-    Args:
-        wb: The openpyxl Workbook object to save
-        filepath: Path to the Excel file
-        
-    Returns:
-        bool: True if save succeeded, False otherwise
-    """
-    temp_path = str(filepath) + ".tmp"
-    backup_path = str(filepath) + ".backup"
-    
-    try:
-        # 1. Save to temporary file first
-        wb.save(temp_path)
-        
-        # 2. Create backup of existing file
-        if os.path.exists(filepath):
-            try:
-                shutil.copy2(filepath, backup_path)
-            except Exception as backup_err:
-                print(f"[WARNING] Failed to create backup: {backup_err}", flush=True)
-        
-        # 3. Atomic replace
-        os.replace(temp_path, filepath)
-        print(f"[SAVE] Successfully saved: {filepath}", flush=True)
-        
-        # 4. Cleanup backup
-        if os.path.exists(backup_path):
-            try:
-                os.remove(backup_path)
-            except Exception:
-                pass  # Not critical if backup removal fails
-        
-        return True
-        
-    except Exception as save_err:
-        print(f"[ERROR] Failed to save workbook: {save_err}", flush=True)
-        # Clean up temp file
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except:
-                pass
-        
-        return False
-        
-    finally:
-        # Always try to close the workbook
-        try:
-            wb.close()
-            print(f"[CLEANUP] Workbook closed", flush=True)
-        except Exception as close_err:
-            print(f"[WARNING] Error closing workbook: {close_err}", flush=True)
+# TRACKED_FILE = str(SCRIPT_DIR / "tracked_users.txt")  # Now using database
 
 
 def load_tracked_users() -> list[str]:
-    """Load tracked usernames from tracked_users.txt."""
-    if not os.path.exists(TRACKED_FILE):
-        return []
-    with open(TRACKED_FILE, "r", encoding="utf-8") as f:
-        lines = [l.strip() for l in f.readlines() if l.strip()]
-    return lines
-
-
-def rotate_daily_to_yesterday() -> dict:
-    """Copy daily snapshot (column F) to yesterday snapshot (column H) for all tracked users.
-    
-    Returns:
-        Dict with results: {username: success}
-    """
-    if not os.path.exists(EXCEL_FILE):
-        print("[SKIP] Excel file not found", flush=True)
-        return {}
-    
-    wb = None
-    try:
-        with FileLock(LOCK_FILE):
-            # FAILSAFE: Load workbook with guaranteed cleanup
-            wb = load_workbook(EXCEL_FILE)
-            users = load_tracked_users()
-            results = {}
-            
-            for username in users:
-                if username not in wb.sheetnames:
-                    print(f"[SKIP] {username} - sheet not found", flush=True)
-                    results[username] = False
-                    continue
-                
-                ws = wb[username]
-                
-                # Check if sheet has the expected layout (column F = Daily Snapshot, H = Yesterday Snapshot)
-                header_f = ws.cell(row=1, column=6).value
-                header_h = ws.cell(row=1, column=8).value
-                
-                if header_f != "Daily Snapshot" or header_h != "Yesterday Snapshot":
-                    print(f"[SKIP] {username} - unexpected layout", flush=True)
-                    results[username] = False
-                    continue
-                
-                # Copy all values from column F (Daily Snapshot) to column H (Yesterday Snapshot)
-                row = 2
-                copied_rows = 0
-                while True:
-                    daily_val = ws.cell(row=row, column=6).value
-                    if daily_val is None and row > 100:  # Stop if we've gone past data
-                        break
-                    
-                    # Copy daily snapshot to yesterday snapshot
-                    ws.cell(row=row, column=8, value=daily_val)
-                    if daily_val is not None:
-                        copied_rows += 1
-                    row += 1
-                
-                print(f"[OK] {username} - copied {copied_rows} rows from daily to yesterday", flush=True)
-                results[username] = True
-            
-            # Use safe save with backup and error recovery
-            save_success = safe_save_workbook(wb, EXCEL_FILE)
-            if not save_success:
-                print("[ERROR] Failed to save Excel file after rotation", flush=True)
-                return {u: False for u in users}  # Mark all as failed
-            
-            print(f"\n[SUMMARY] Rotated daily->yesterday for {sum(results.values())}/{len(users)} users", flush=True)
-            return results
-        
-    except Exception as e:
-        print(f"[ERROR] Exception during rotate_daily_to_yesterday: {e}", flush=True)
-        return {}
-        
-    finally:
-        # FAILSAFE: Always close workbook even if an error occurs
-        if wb is not None:
-            try:
-                wb.close()
-                print("[CLEANUP] Workbook closed", flush=True)
-            except Exception as close_err:
-                print(f"[WARNING] Error closing workbook: {close_err}", flush=True)
+    """Load tracked usernames from database."""
+    return get_tracked_users()
 
 
 def run_api_get(username: str, api_key: str, snapshot_flags: list[str]) -> bool:
@@ -234,7 +55,8 @@ def batch_update(schedule: str, api_key: str | None = None) -> dict:
     # Special handling for 'yesterday' schedule - rotate daily->yesterday without API calls
     if schedule == 'yesterday':
         print("[INFO] Running yesterday rotation (copying daily->yesterday snapshots)", flush=True)
-        results = rotate_daily_to_yesterday()
+        users = load_tracked_users()
+        results = rotate_daily_to_yesterday(users)
         # Return results in the expected format
         return {username: (success, ['rotate']) for username, success in results.items()}
     
@@ -268,7 +90,7 @@ def batch_update(schedule: str, api_key: str | None = None) -> dict:
         
         print(f"[RUN] [{idx}/{len(users)}] {username} - updating stats and taking snapshots: {', '.join(snapshots_to_take)}", flush=True)
         
-        # Always update current stats first (column B), then take snapshots
+        # Always update current stats first (lifetime values), then take snapshots
         # This ensures the all-time stats are fresh before calculating deltas
         success = run_api_get(username, api_key, snapshots_to_take)
         

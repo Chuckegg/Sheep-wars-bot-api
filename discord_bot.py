@@ -5,6 +5,29 @@ import sys
 import openpyxl
 from openpyxl import load_workbook
 import os
+
+# Database imports
+from db_helper import (
+    get_all_usernames,
+    get_user_stats_with_deltas,
+    get_user_meta,
+    update_user_meta,
+    user_exists,
+    get_discord_id,
+    set_discord_link,
+    get_all_user_links,
+    get_default_username,
+    set_default_username,
+    get_all_default_users,
+    get_tracked_streaks,
+    update_tracked_streaks,
+    get_all_tracked_streaks,
+    add_tracked_user,
+    remove_tracked_user,
+    is_tracked_user,
+    get_tracked_users,
+    set_tracked_users
+)
 import re
 import shutil
 from zoneinfo import ZoneInfo
@@ -25,11 +48,9 @@ except Exception:
 BOT_DIR = Path(__file__).parent.absolute()
 
 # tracked/users + creator info
-TRACKED_FILE = os.path.join(os.path.dirname(__file__), "tracked_users.txt")
-USER_LINKS_FILE = os.path.join(os.path.dirname(__file__), "user_links.json")
-USER_COLORS_FILE = os.path.join(os.path.dirname(__file__), "user_colors.json")
-DEFAULT_USERS_FILE = os.path.join(os.path.dirname(__file__), "default_users.json")
-TRACKED_STREAKS_FILE = os.path.join(os.path.dirname(__file__), "tracked_streaks.json")
+# TRACKED_FILE - now in database (tracked_users table)
+# JSON files are now replaced with database tables
+# USER_LINKS_FILE, USER_COLORS_FILE, DEFAULT_USERS_FILE, TRACKED_STREAKS_FILE - now in database
 CREATOR_NAME = "chuckegg"
 # Optionally set a numeric Discord user ID for direct DM (recommended for reliability)
 CREATOR_ID = "542467909549555734"
@@ -109,7 +130,8 @@ def _load_font(font_name: str, font_size: int):
     except:
         return ImageFont.load_default()
 
-LOCK_FILE = str(BOT_DIR / "stats.xlsx.lock")
+LOCK_FILE = str(BOT_DIR / "stats.xlsx.lock")  # Kept for backward compatibility
+DB_FILE = BOT_DIR / "stats.db"
 
 class FileLock:
     """Simple file-based lock to prevent concurrent Excel writes."""
@@ -156,23 +178,23 @@ class StatsCache:
         self.data = {}
         self.last_mtime = 0
         self.lock = asyncio.Lock()
-        self.excel_path = BOT_DIR / "stats.xlsx"
+        self.db_path = DB_FILE
 
     async def get_data(self):
-        """Get cached data, reloading from disk if the file has changed."""
-        if not self.excel_path.exists():
+        """Get cached data, reloading from database if it has changed."""
+        if not self.db_path.exists():
             return {}
 
         try:
-            current_mtime = self.excel_path.stat().st_mtime
+            current_mtime = self.db_path.stat().st_mtime
             
             # Double-check locking to prevent multiple reloads
             if current_mtime > self.last_mtime:
                 async with self.lock:
                     # Check again inside lock
                     if current_mtime > self.last_mtime:
-                        print(f"[CACHE] File changed. Reloading stats cache...")
-                        self.data = await asyncio.to_thread(self._load_from_excel)
+                        print(f"[CACHE] Database changed. Reloading stats cache...")
+                        self.data = await asyncio.to_thread(self._load_from_database)
                         self.last_mtime = current_mtime
                         print(f"[CACHE] Reload complete. Cached {len(self.data)} users.")
             
@@ -181,48 +203,37 @@ class StatsCache:
             print(f"[CACHE] Error accessing cache: {e}")
             return self.data
 
-    def _load_from_excel(self):
-        with FileLock(LOCK_FILE):
-            wb = load_workbook(str(self.excel_path), read_only=True, data_only=True)
-            cache = {}
-            
-            # Load colors once
-            all_user_data = {}
-            if os.path.exists(USER_COLORS_FILE):
-                try:
-                    with open(USER_COLORS_FILE, 'r') as f: all_user_data = json.load(f)
-                except: pass
+    def _load_from_database(self):
+        """Load all user data from SQLite database."""
+        cache = {}
+        
+        # No need to load colors separately - will get from database per user
+        all_user_data = {}
 
-            for sheet_name in wb.sheetnames:
-                if sheet_name.casefold() == "sheep wars historical data": continue
+        try:
+            # Get all usernames
+            usernames = get_all_usernames()
+            
+            for username in usernames:
                 try:
-                    sheet = wb[sheet_name]
-                    user_cache = {"stats": {}, "meta": {}}
+                    # Get stats with deltas
+                    stats = get_user_stats_with_deltas(username)
                     
-                    # Read all rows efficiently
-                    rows = list(sheet.iter_rows(min_row=1, max_row=200, values_only=True))
+                    # Get metadata
+                    meta_db = get_user_meta(username)
                     
-                    for row in rows:
-                        if not row or not row[0]: continue
-                        stat_name = str(row[0]).lower()
-                        
-                        def get_val(idx):
-                            return _to_number(row[idx]) if idx < len(row) else 0.0
-                            
-                        user_cache["stats"][stat_name] = {
-                            "lifetime": get_val(1),
-                            "session": get_val(2),
-                            "daily": get_val(4),
-                            "yesterday": get_val(6),
-                            "monthly": get_val(8)
-                        }
+                    if not stats:
+                        continue
                     
-                    # Meta
-                    level = int(user_cache["stats"].get('level', {}).get('lifetime', 0))
-                    if level == 0 and 'experience' in user_cache["stats"]:
-                        level = int(user_cache["stats"]['experience']['lifetime'] / 5000)
+                    user_cache = {"stats": stats, "meta": {}}
                     
-                    user_info = all_user_data.get(sheet_name.lower(), {})
+                    # Calculate level from stats if available
+                    level = int(stats.get('level', {}).get('lifetime', 0))
+                    if level == 0 and 'experience' in stats:
+                        level = int(stats['experience']['lifetime'] / 5000)
+                    
+                    # Get user color info
+                    user_info = all_user_data.get(username.lower(), {})
                     if isinstance(user_info, str):
                         ign_color, g_tag, g_hex = user_info, None, "#AAAAAA"
                     else:
@@ -230,27 +241,44 @@ class StatsCache:
                         g_tag = user_info.get('guild_tag')
                         raw_g = str(user_info.get('guild_color', 'GRAY')).upper()
                         g_hex = raw_g if raw_g.startswith('#') else MINECRAFT_NAME_TO_HEX.get(raw_g, "#AAAAAA")
-
-                    user_cache["meta"] = {"level": level, "icon": get_prestige_icon(level), "ign_color": ign_color, "guild_tag": g_tag, "guild_hex": g_hex, "username": sheet_name}
-                    cache[sheet_name] = user_cache
-                except Exception: continue
+                    
+                    # Override with database metadata if available
+                    if meta_db:
+                        if meta_db.get('guild_tag'):
+                            g_tag = meta_db['guild_tag']
+                        if meta_db.get('guild_hex'):
+                            g_hex = meta_db['guild_hex']
+                    
+                    user_cache["meta"] = {
+                        "level": level,
+                        "icon": get_prestige_icon(level),
+                        "ign_color": ign_color,
+                        "guild_tag": g_tag,
+                        "guild_hex": g_hex,
+                        "username": username
+                    }
+                    
+                    cache[username] = user_cache
+                    
+                except Exception as e:
+                    print(f"[CACHE] Error loading user {username}: {e}")
+                    continue
             
-            wb.close()
             return cache
+            
+        except Exception as e:
+            print(f"[CACHE] Error loading from database: {e}")
+            return {}
 
     async def update_cache_entry(self, username: str, processed_stats: dict):
-        """Update a single user's cache entry from api_get.py output without reloading Excel."""
+        """Update a single user's cache entry from api_get.py output without reloading database."""
         async with self.lock:
             # Ensure data dict exists
             if not self.data:
                 self.data = {}
             
-            # Load colors/meta
+            # Get meta from database
             all_user_data = {}
-            if os.path.exists(USER_COLORS_FILE):
-                try:
-                    with open(USER_COLORS_FILE, 'r') as f: all_user_data = json.load(f)
-                except: pass
             
             # Calculate meta
             level = int(processed_stats.get('level', {}).get('lifetime', 0))
@@ -276,16 +304,16 @@ class StatsCache:
                 print(f"[STREAK] Failed to update streaks for {username}: {e}")
             
             # Update mtime to prevent the next get_data call from reloading
-            if self.excel_path.exists():
-                self.last_mtime = self.excel_path.stat().st_mtime
+            if self.db_path.exists():
+                self.last_mtime = self.db_path.stat().st_mtime
 
     async def refresh(self):
-        """Force reload of cache from Excel."""
+        """Force reload of cache from database."""
         async with self.lock:
             print("[CACHE] Forcing cache refresh...")
-            self.data = await asyncio.to_thread(self._load_from_excel)
-            if self.excel_path.exists():
-                self.last_mtime = self.excel_path.stat().st_mtime
+            self.data = await asyncio.to_thread(self._load_from_database)
+            if self.db_path.exists():
+                self.last_mtime = self.db_path.stat().st_mtime
             print(f"[CACHE] Refresh complete. Cached {len(self.data)} users.")
 
 STATS_CACHE = StatsCache()
@@ -1920,32 +1948,12 @@ async def _send_paged_ansi_followups(interaction: discord.Interaction, lines: li
                 pass
 
 def load_tracked_users():
-    if not os.path.exists(TRACKED_FILE):
-        return []
-    with open(TRACKED_FILE, "r", encoding="utf-8") as f:
-        lines = [l.strip() for l in f.readlines() if l.strip()]
-    return lines
-
-def add_tracked_user(ign: str) -> bool:
-    users = load_tracked_users()
-    key = ign.casefold()
-    for u in users:
-        if u.casefold() == key:
-            return False
-    # append
-    with open(TRACKED_FILE, "a", encoding="utf-8") as f:
-        f.write(ign + "\n")
-    return True
+    return get_tracked_users()
 
 
 def load_tracked_streaks() -> dict:
-    if not os.path.exists(TRACKED_STREAKS_FILE):
-        return {}
     try:
-        with open(TRACKED_STREAKS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if isinstance(data, dict):
-                return data
+        return get_all_tracked_streaks()
     except Exception:
         pass
     return {}
@@ -1953,21 +1961,27 @@ def load_tracked_streaks() -> dict:
 
 def save_tracked_streaks(data: dict):
     try:
-        with open(TRACKED_STREAKS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        for username, streak_data in data.items():
+            update_tracked_streaks(username, streak_data)
     except Exception as e:
-        print(f"[STREAK] Failed to save streaks file: {e}")
+        print(f"[STREAK] Failed to save streaks to database: {e}")
 
 
 def load_user_colors() -> dict:
-    """Load user colors and metadata from user_colors.json"""
-    if not os.path.exists(USER_COLORS_FILE):
-        return {}
+    """Load user colors and metadata from database"""
     try:
-        with open(USER_COLORS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if isinstance(data, dict):
-                return data
+        result = {}
+        usernames = get_all_usernames()
+        for username in usernames:
+            meta = get_user_meta(username)
+            if meta:
+                # Convert database format to expected format
+                result[username.lower()] = {
+                    'color': meta.get('ign_color'),
+                    'guild_tag': meta.get('guild_tag'),
+                    'guild_color': meta.get('guild_hex')
+                }
+        return result
     except Exception:
         pass
     return {}
@@ -2045,19 +2059,16 @@ def initialize_streak_entry(username: str, processed_stats: dict):
     save_tracked_streaks(streaks)
 
 def load_user_links():
-    """Load username -> Discord user ID mappings from JSON file"""
-    if not os.path.exists(USER_LINKS_FILE):
-        return {}
+    """Load username -> Discord user ID mappings from database"""
     try:
-        with open(USER_LINKS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        return get_all_user_links()
     except Exception:
         return {}
 
 def save_user_links(links: dict):
-    """Save username -> Discord user ID mappings to JSON file"""
-    with open(USER_LINKS_FILE, "w", encoding="utf-8") as f:
-        json.dump(links, f, indent=2)
+    """Save username -> Discord user ID mappings to database"""
+    for username, discord_id in links.items():
+        set_discord_link(username, discord_id)
 
 def link_user_to_ign(discord_user_id: int, ign: str):
     """Link a Discord user ID to a Minecraft username (case-insensitive)"""
@@ -2080,24 +2091,6 @@ def is_admin(user: Union[discord.User, discord.Member]) -> bool:
         return True
     return False
 
-def remove_tracked_user(ign: str) -> bool:
-    """Remove a username from tracked users list"""
-    users = load_tracked_users()
-    key = ign.casefold()
-    found = False
-    new_users = []
-    for u in users:
-        if u.casefold() == key:
-            found = True
-        else:
-            new_users.append(u)
-    
-    if found:
-        with open(TRACKED_FILE, "w", encoding="utf-8") as f:
-            for u in new_users:
-                f.write(u + "\n")
-    return found
-
 def unlink_user_from_ign(ign: str) -> bool:
     """Remove username -> Discord user ID link"""
     links = load_user_links()
@@ -2109,18 +2102,11 @@ def unlink_user_from_ign(ign: str) -> bool:
     return False
 
 def remove_user_color(ign: str) -> bool:
-    """Remove username from user_colors.json"""
+    """Remove username color from database"""
     try:
-        if not os.path.exists(USER_COLORS_FILE):
-            return False
-        with open(USER_COLORS_FILE, 'r') as f:
-            color_data = json.load(f)
-        
-        key = ign.casefold()
-        if key in color_data:
-            del color_data[key]
-            with open(USER_COLORS_FILE, 'w') as f:
-                json.dump(color_data, f, indent=2)
+        meta = get_user_meta(ign)
+        if meta and meta.get('ign_color'):
+            update_user_meta(ign, ign_color=None)
             return True
         return False
     except Exception as e:
@@ -2128,51 +2114,21 @@ def remove_user_color(ign: str) -> bool:
         return False
 
 def delete_user_sheet(ign: str) -> bool:
-    """Delete username's sheet from stats.xlsx"""
-    wb = None
+    """Delete user's data from database."""
     try:
-        excel_file = BOT_DIR / "stats.xlsx"
-        if not excel_file.exists():
+        from db_helper import delete_user, user_exists
+        
+        if not user_exists(ign):
+            print(f"[INFO] User {ign} not found in database")
             return False
         
-        wb = None
-        try:
-            with FileLock(LOCK_FILE):
-                # FAILSAFE: Load workbook with guaranteed cleanup
-                wb = load_workbook(str(excel_file))
-                key = ign.casefold()
-                sheet_to_delete = None
-                
-                for sheet_name in wb.sheetnames:
-                    if sheet_name.casefold() == key:
-                        sheet_to_delete = sheet_name
-                        break
-                
-                if sheet_to_delete:
-                    del wb[sheet_to_delete]
-                    save_success = safe_save_workbook(wb, str(excel_file))
-                    if not save_success:
-                        print(f"[ERROR] Failed to save after deleting sheet for {ign}")
-                        return False
-                    return True
-        finally:
-            if wb is not None:
-                wb.close()
-
-        # Sheet not found
-        return False
+        delete_user(ign)
+        print(f"[INFO] Deleted user {ign} from database")
+        return True
         
     except Exception as e:
-        print(f"[ERROR] Failed to delete sheet for {ign}: {e}")
+        print(f"[ERROR] Failed to delete user {ign}: {e}")
         return False
-        
-    finally:
-        # FAILSAFE: Always close workbook even if an error occurs
-        if wb is not None:
-            try:
-                wb.close()
-            except Exception as close_err:
-                print(f"[WARNING] Error closing workbook: {close_err}")
 
 def render_modern_card(label, value, width, height, color=(255, 255, 255), is_header=False):
     img = Image.new('RGBA', (int(width), int(height)), (0, 0, 0, 0))
@@ -2270,17 +2226,14 @@ def get_player_status(ign):
 
 # ---- Default IGN helpers ----
 def load_default_users() -> dict:
-    if not os.path.exists(DEFAULT_USERS_FILE):
-        return {}
     try:
-        with open(DEFAULT_USERS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        return get_all_default_users()
     except Exception:
         return {}
 
 def save_default_users(defaults: dict):
-    with open(DEFAULT_USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(defaults, f, indent=2)
+    for discord_id, username in defaults.items():
+        set_default_username(discord_id, username)
 
 def set_default_user(discord_user_id: int, ign: str):
     defaults = load_default_users()
@@ -2319,11 +2272,11 @@ async def cleanup_untracked_user_delayed(ign: str, delay_seconds: int = 60):
         for tracked_user in tracked_users:
             if tracked_user.casefold() == key:
                 # User is now tracked, don't clean up
-                print(f"[CLEANUP] SKIPPING cleanup for '{ign}' - found in tracked_users.txt as '{tracked_user}'")
+                print(f"[CLEANUP] SKIPPING cleanup for '{ign}' - found in tracked users database as '{tracked_user}'")
                 return
         
         # User is still untracked, proceed with cleanup
-        print(f"[CLEANUP] User '{ign}' NOT FOUND in tracked_users.txt")
+        print(f"[CLEANUP] User '{ign}' NOT FOUND in tracked users database")
         print(f"[CLEANUP] Reason: User was queried via /sheepwars but is not in tracked list")
         print(f"[CLEANUP] Proceeding with cleanup: removing color data and deleting sheet")
         
@@ -2565,9 +2518,10 @@ def inline_backup_fallback():
     """Inline backup fallback when backup_hourly.py script fails."""
     import shutil
     from datetime import datetime
+    from db_helper import backup_database
     
     try:
-        excel_file = BOT_DIR / "stats.xlsx"
+        db_file = DB_FILE
         backup_dir = BOT_DIR / "backups"
         
         # Try primary backup directory
@@ -2581,29 +2535,21 @@ def inline_backup_fallback():
                 backup_dir.mkdir(exist_ok=True, mode=0o755)
                 print(f"[FALLBACK] Using alternate directory: {backup_dir}")
         
-        if not excel_file.exists():
-            print(f"[FALLBACK] Excel file not found: {excel_file}")
+        if not db_file.exists():
+            print(f"[FALLBACK] Database file not found: {db_file}")
             return False
         
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-00-00")
-        backup_path = backup_dir / f"stats_{timestamp}.xlsx"
+        backup_path = backup_dir / f"stats_{timestamp}.db"
         
         if backup_path.exists():
             print(f"[FALLBACK] Backup already exists: {backup_path.name}")
             return True
         
-        # Try multiple copy methods
-        try:
-            shutil.copy2(excel_file, backup_path)
-        except:
-            try:
-                shutil.copy(excel_file, backup_path)
-            except:
-                with open(excel_file, 'rb') as src:
-                    with open(backup_path, 'wb') as dst:
-                        dst.write(src.read())
+        # Use database helper to backup
+        success = backup_database(backup_path)
         
-        if backup_path.exists():
+        if success and backup_path.exists():
             size = backup_path.stat().st_size
             print(f"[FALLBACK] Backup created: {backup_path.name} ({size:,} bytes)")
             return True
@@ -2757,16 +2703,13 @@ class StatsTabView(discord.ui.View):
         self.update_button_styles()
 
     def _load_color(self):
-        if os.path.exists(USER_COLORS_FILE):
-            try:
-                with open(USER_COLORS_FILE, 'r') as f:
-                    data = json.load(f).get(self.ign.lower(), {})
-                    if isinstance(data, dict):
-                        self.ign_color = data.get('color')
-                        self.guild_tag = data.get('guild_tag')
-                        g_color_text = str(data.get('guild_color', 'GRAY')).upper()
-                        self.guild_hex = MINECRAFT_NAME_TO_HEX.get(g_color_text, "#AAAAAA")
-            except: pass
+        try:
+            meta = get_user_meta(self.ign)
+            if meta:
+                self.ign_color = meta.get('ign_color')
+                self.guild_tag = meta.get('guild_tag')
+                self.guild_hex = meta.get('guild_hex') or "#AAAAAA"
+        except: pass
 
     def update_button_styles(self):
         """Setzt den aktiven Button auf Blau (Primary) und andere auf Grau (Secondary)."""
@@ -2832,22 +2775,17 @@ class StatsFullView(discord.ui.View):
         self.update_buttons()
 
     def _load_color(self):
-        """Load or reload the color and guild info for this username from user_colors.json"""
+        """Load or reload the color and guild info for this username from database"""
         self.ign_color = None
         self.guild_tag = None
         self.guild_color = None
         try:
-            if os.path.exists(USER_COLORS_FILE):
-                with open(USER_COLORS_FILE, 'r') as f:
-                    color_data = json.load(f)
-                    user_entry = color_data.get(self.ign.lower())
-                    if isinstance(user_entry, str):
-                        self.ign_color = user_entry
-                    elif isinstance(user_entry, dict):
-                        self.ign_color = user_entry.get('color')
-                        self.guild_tag = user_entry.get('guild_tag')
-                        self.guild_color = user_entry.get('guild_color')
-                    print(f"[DEBUG] Loaded color for {self.ign}: {self.ign_color}, guild: [{self.guild_tag}] ({self.guild_color})")
+            meta = get_user_meta(self.ign)
+            if meta:
+                self.ign_color = meta.get('ign_color')
+                self.guild_tag = meta.get('guild_tag')
+                self.guild_color = meta.get('guild_hex')
+                print(f"[DEBUG] Loaded color for {self.ign}: {self.ign_color}, guild: [{self.guild_tag}] ({self.guild_color})")
         except Exception as e:
             print(f"[WARNING] Failed to load color for {self.ign}: {e}")
 
@@ -3214,14 +3152,11 @@ class LeaderboardView(discord.ui.View):
         # Load user colors
         self.user_colors = {}
         try:
-            if os.path.exists(USER_COLORS_FILE):
-                with open(USER_COLORS_FILE, 'r') as f:
-                    color_data = json.load(f)
-                    for username, user_entry in color_data.items():
-                        if isinstance(user_entry, str):
-                            self.user_colors[username] = user_entry
-                        elif isinstance(user_entry, dict):
-                            self.user_colors[username] = user_entry.get('color')
+            usernames = get_all_usernames()
+            for username in usernames:
+                meta = get_user_meta(username)
+                if meta and meta.get('ign_color'):
+                    self.user_colors[username.lower()] = meta.get('ign_color')
         except Exception as e:
             print(f"[WARNING] Failed to load user colors: {e}")
 
@@ -3360,54 +3295,29 @@ class LeaderboardPeriodSelect(discord.ui.Select):
 
 
 def _load_leaderboard_data_from_excel(metric: str):
-    """Load leaderboard data directly from Excel file instead of cache.
+    """Load leaderboard data from database.
     
     Returns dict with period -> list of (username, value, display_value, is_playtime, level, icon, color, guild_tag, guild_color)
     """
     periods = ["lifetime", "session", "daily", "yesterday", "monthly"]
     result = {p: [] for p in periods}
     
-    EXCEL_FILE = BOT_DIR / "stats.xlsx"
-    if not EXCEL_FILE.exists():
-        return result
-    
     try:
-        with FileLock(LOCK_FILE):
-            wb = openpyxl.load_workbook(EXCEL_FILE, data_only=True)
-            
-            for sheet_name in wb.sheetnames:
-                ws = wb[sheet_name]
-                username = sheet_name
+        # Get all users from database
+        usernames = get_all_usernames()
+        
+        # Load user colors
+        user_colors = load_user_colors()
+        
+        for username in usernames:
+            try:
+                # Get stats with deltas
+                stats_dict = get_user_stats_with_deltas(username)
                 
-                # Read stats from the Excel sheet
-                stats_dict = {}
+                if not stats_dict:
+                    continue
                 
-                # Expected header row is row 1
-                headers = {}
-                for col_idx, cell in enumerate(ws[1], 1):
-                    if cell.value:
-                        headers[col_idx] = str(cell.value).lower()
-                
-                # Read data rows (skip header)
-                for row_idx in range(2, ws.max_row + 1):
-                    stat_name = ws.cell(row_idx, 1).value
-                    if not stat_name:
-                        continue
-                    
-                    stat_name = str(stat_name).lower().strip()
-                    
-                    # Extract period values
-                    # Column B = Lifetime, C = Session Delta, E = Daily Delta, G = Yesterday Delta, I = Monthly Delta
-                    stats_dict[stat_name] = {
-                        "lifetime": ws.cell(row_idx, 2).value or 0,
-                        "session": ws.cell(row_idx, 3).value or 0,
-                        "daily": ws.cell(row_idx, 5).value or 0,
-                        "yesterday": ws.cell(row_idx, 7).value or 0,
-                        "monthly": ws.cell(row_idx, 9).value or 0,
-                    }
-                
-                # Load user metadata
-                user_colors = load_user_colors()
+                # Get metadata
                 user_meta = user_colors.get(username.lower(), {})
                 
                 # Try to get level from stats_dict first
@@ -3429,7 +3339,7 @@ def _load_leaderboard_data_from_excel(metric: str):
                 for period in periods:
                     val = 0
                     
-                    # Map metric names to Excel column patterns
+                    # Map metric names to database columns
                     if metric == "kills":
                         val = stats_dict.get("kills", {}).get(period, 0)
                     elif metric == "deaths":
@@ -3453,13 +3363,13 @@ def _load_leaderboard_data_from_excel(metric: str):
                     elif metric == "coins":
                         val = stats_dict.get("coins", {}).get(period, 0)
                     elif metric == "damage_dealt":
-                        val = stats_dict.get("damage dealt", {}).get(period, 0)
+                        val = stats_dict.get("damage_dealt", {}).get(period, 0)
                     elif metric == "games_played":
-                        val = stats_dict.get("games played", {}).get(period, 0)
+                        val = stats_dict.get("games_played", {}).get(period, 0)
                     elif metric == "sheep_thrown":
-                        val = stats_dict.get("sheep thrown", {}).get(period, 0)
+                        val = stats_dict.get("sheep_thrown", {}).get(period, 0)
                     elif metric == "magic_wool_hit":
-                        val = stats_dict.get("magic wool hit", {}).get(period, 0)
+                        val = stats_dict.get("magic_wool_hit", {}).get(period, 0)
                     elif metric == "playtime":
                         val = stats_dict.get("playtime", {}).get(period, 0)
                     else:
@@ -3469,8 +3379,9 @@ def _load_leaderboard_data_from_excel(metric: str):
                     result[period].append((
                         username, float(val), val, is_playtime, level, icon, ign_color, guild_tag, guild_color
                     ))
-            
-            wb.close()
+            except Exception as e:
+                print(f"[LEADERBOARD] Error processing {username}: {e}")
+                continue
             
             # Sort each period by value descending
             for p in result:
@@ -3525,39 +3436,39 @@ def _calculate_ratio_value_from_excel(stats_dict: dict, period: str, metric: str
             return round(kills / deaths, 2) if deaths > 0 else kills
         elif metric == "kills_per_game":
             kills = stats_dict.get("kills", {}).get(period, 0)
-            games = stats_dict.get("games played", {}).get(period, 0)
+            games = stats_dict.get("games_played", {}).get(period, 0)
             return round(kills / games, 2) if games > 0 else 0
         elif metric == "kills_per_win":
             kills = stats_dict.get("kills", {}).get(period, 0)
             wins = stats_dict.get("wins", {}).get(period, 0)
             return round(kills / wins, 2) if wins > 0 else 0
         elif metric == "damage_per_game":
-            damage = stats_dict.get("damage dealt", {}).get(period, 0)
-            games = stats_dict.get("games played", {}).get(period, 0)
+            damage = stats_dict.get("damage_dealt", {}).get(period, 0)
+            games = stats_dict.get("games_played", {}).get(period, 0)
             return round(damage / games, 2) if games > 0 else 0
         elif metric == "damage_per_sheep":
-            damage = stats_dict.get("damage dealt", {}).get(period, 0)
-            sheep = stats_dict.get("sheep thrown", {}).get(period, 0)
+            damage = stats_dict.get("damage_dealt", {}).get(period, 0)
+            sheep = stats_dict.get("sheep_thrown", {}).get(period, 0)
             return round(damage / sheep, 2) if sheep > 0 else 0
         elif metric == "wools_per_game":
-            wools = stats_dict.get("magic wool hit", {}).get(period, 0)
-            games = stats_dict.get("games played", {}).get(period, 0)
+            wools = stats_dict.get("magic_wool_hit", {}).get(period, 0)
+            games = stats_dict.get("games_played", {}).get(period, 0)
             return round(wools / games, 2) if games > 0 else 0
         elif metric == "void_kd_ratio":
-            void_kills = stats_dict.get("kills void", {}).get(period, 0)
-            void_deaths = stats_dict.get("deaths void", {}).get(period, 0)
+            void_kills = stats_dict.get("kills_void", {}).get(period, 0)
+            void_deaths = stats_dict.get("deaths_void", {}).get(period, 0)
             return round(void_kills / void_deaths, 2) if void_deaths > 0 else void_kills
         elif metric == "explosive_kd_ratio":
-            exp_kills = stats_dict.get("kills explosive", {}).get(period, 0)
-            exp_deaths = stats_dict.get("deaths explosive", {}).get(period, 0)
+            exp_kills = stats_dict.get("kills_explosive", {}).get(period, 0)
+            exp_deaths = stats_dict.get("deaths_explosive", {}).get(period, 0)
             return round(exp_kills / exp_deaths, 2) if exp_deaths > 0 else exp_kills
         elif metric == "bow_kd_ratio":
-            bow_kills = stats_dict.get("kills bow", {}).get(period, 0)
-            bow_deaths = stats_dict.get("deaths bow", {}).get(period, 0)
+            bow_kills = stats_dict.get("kills_bow", {}).get(period, 0)
+            bow_deaths = stats_dict.get("deaths_bow", {}).get(period, 0)
             return round(bow_kills / bow_deaths, 2) if bow_deaths > 0 else bow_kills
         elif metric == "melee_kd_ratio":
-            melee_kills = stats_dict.get("kills melee", {}).get(period, 0)
-            melee_deaths = stats_dict.get("deaths melee", {}).get(period, 0)
+            melee_kills = stats_dict.get("kills_melee", {}).get(period, 0)
+            melee_deaths = stats_dict.get("deaths_melee", {}).get(period, 0)
             return round(melee_kills / melee_deaths, 2) if melee_deaths > 0 else melee_kills
         elif metric == "exp_per_hour":
             exp = stats_dict.get("experience", {}).get(period, 0)
@@ -3566,7 +3477,7 @@ def _calculate_ratio_value_from_excel(stats_dict: dict, period: str, metric: str
             return round(exp / hours, 2) if hours > 0 else 0
         elif metric == "exp_per_game":
             exp = stats_dict.get("experience", {}).get(period, 0)
-            games = stats_dict.get("games played", {}).get(period, 0)
+            games = stats_dict.get("games_played", {}).get(period, 0)
             return round(exp / games, 2) if games > 0 else 0
         elif metric == "wins_per_hour":
             wins = stats_dict.get("wins", {}).get(period, 0)
@@ -3579,52 +3490,34 @@ def _calculate_ratio_value_from_excel(stats_dict: dict, period: str, metric: str
             hours = playtime / 3600
             return round(kills / hours, 2) if hours > 0 else 0
         elif metric == "sheeps_per_game":
-            sheep = stats_dict.get("sheep thrown", {}).get(period, 0)
-            games = stats_dict.get("games played", {}).get(period, 0)
+            sheep = stats_dict.get("sheep_thrown", {}).get(period, 0)
+            games = stats_dict.get("games_pulled", {}).get(period, 0)
             return round(sheep / games, 2) if games > 0 else 0
     except:
         return None
     return None
 
 def _load_ratio_leaderboard_data_from_excel(metric: str):
-    """Load ratio leaderboard data directly from Excel file."""
+    """Load ratio leaderboard data from database."""
     periods = ["lifetime", "session", "daily", "yesterday", "monthly"]
     result = {p: [] for p in periods}
     
-    EXCEL_FILE = BOT_DIR / "stats.xlsx"
-    if not EXCEL_FILE.exists():
-        return result
-    
     try:
-        with FileLock(LOCK_FILE):
-            wb = openpyxl.load_workbook(EXCEL_FILE, data_only=True)
-            
-            for sheet_name in wb.sheetnames:
-                ws = wb[sheet_name]
-                username = sheet_name
+        # Get all users from database
+        usernames = get_all_usernames()
+        
+        # Load user colors
+        user_colors = load_user_colors()
+        
+        for username in usernames:
+            try:
+                # Get stats with deltas
+                stats_dict = get_user_stats_with_deltas(username)
                 
-                # Read stats from the Excel sheet
-                stats_dict = {}
+                if not stats_dict:
+                    continue
                 
-                # Expected header row is row 1
-                for row_idx in range(2, ws.max_row + 1):
-                    stat_name = ws.cell(row_idx, 1).value
-                    if not stat_name:
-                        continue
-                    
-                    stat_name = str(stat_name).lower().strip()
-                    
-                    # Extract period values
-                    stats_dict[stat_name] = {
-                        "lifetime": ws.cell(row_idx, 2).value or 0,
-                        "session": ws.cell(row_idx, 3).value or 0,
-                        "daily": ws.cell(row_idx, 5).value or 0,
-                        "yesterday": ws.cell(row_idx, 7).value or 0,
-                        "monthly": ws.cell(row_idx, 9).value or 0,
-                    }
-                
-                # Load user metadata
-                user_colors = load_user_colors()
+                # Get metadata
                 user_meta = user_colors.get(username.lower(), {})
                 
                 # Try to get level from stats_dict first
@@ -3649,8 +3542,9 @@ def _load_ratio_leaderboard_data_from_excel(metric: str):
                         result[period].append((
                             username, float(val), val, level, icon, ign_color, guild_tag, guild_color
                         ))
-            
-            wb.close()
+            except Exception as e:
+                print(f"[LEADERBOARD] Error processing {username}: {e}")
+                continue
             
             # Sort each period by value descending
             for p in result:
@@ -4119,7 +4013,7 @@ async def track(interaction: discord.Interaction, ign: str):
             return
     
     try:
-        # Check if user is already in tracked_users.txt
+        # Check if user is already in tracked users database
         tracked_users = load_tracked_users()
         key = ign.casefold()
         for tracked_user in tracked_users:
@@ -4548,32 +4442,12 @@ async def color(interaction: discord.Interaction, ign: str = None, color: discor
         return
     
     try:
-        # Load or create color preferences
-        color_data = {}
-        if os.path.exists(USER_COLORS_FILE):
-            with open(USER_COLORS_FILE, 'r') as f:
-                color_data = json.load(f)
-        
         # Get hex color from code
         color_code = color.value
         hex_color = MINECRAFT_CODE_TO_HEX.get(color_code, '#FFFFFF')
         
-        # Store the color preference with new structure
-        username_key = ign.lower()
-        if username_key in color_data:
-            # Update existing entry, preserve rank if it exists
-            if isinstance(color_data[username_key], dict):
-                color_data[username_key]['color'] = hex_color
-            else:
-                # Old format, convert to new format
-                color_data[username_key] = {'color': hex_color, 'rank': None}
-        else:
-            # New entry
-            color_data[username_key] = {'color': hex_color, 'rank': None}
-        
-        # Save to file
-        with open(USER_COLORS_FILE, 'w') as f:
-            json.dump(color_data, f, indent=2)
+        # Update color in database
+        update_user_meta(ign, ign_color=hex_color)
         
         await interaction.followup.send(f"Successfully set {ign}'s username color to {color.name}!", ephemeral=True)
         
