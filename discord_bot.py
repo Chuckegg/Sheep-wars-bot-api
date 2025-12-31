@@ -1112,7 +1112,7 @@ def create_stats_composite_image(level, icon, ign, tab_name, wins, losses, wl_ra
     margin, spacing = 40, 15
     composite = Image.new('RGBA', (canvas_w, canvas_h), (18, 18, 20, 255))
     
-    formatted_playtime = format_playtime
+    formatted_playtime = format_playtime(playtime_seconds)
     skin_w, skin_h = 240, 285
     header_card_w = (canvas_w - (margin * 2) - skin_w - (spacing * 2)) // 2
     
@@ -3393,13 +3393,13 @@ def _load_leaderboard_data_from_excel(metric: str):
                     stat_name = str(stat_name).lower().strip()
                     
                     # Extract period values
-                    # Column B = Lifetime, C = Session Delta, D = Daily, E = Yesterday, F = Monthly
+                    # Column B = Lifetime, C = Session Delta, E = Daily Delta, G = Yesterday Delta, I = Monthly Delta
                     stats_dict[stat_name] = {
                         "lifetime": ws.cell(row_idx, 2).value or 0,
                         "session": ws.cell(row_idx, 3).value or 0,
-                        "daily": ws.cell(row_idx, 4).value or 0,
-                        "yesterday": ws.cell(row_idx, 5).value or 0,
-                        "monthly": ws.cell(row_idx, 6).value or 0,
+                        "daily": ws.cell(row_idx, 5).value or 0,
+                        "yesterday": ws.cell(row_idx, 7).value or 0,
+                        "monthly": ws.cell(row_idx, 9).value or 0,
                     }
                 
                 # Load user metadata
@@ -3614,9 +3614,9 @@ def _load_ratio_leaderboard_data_from_excel(metric: str):
                     stats_dict[stat_name] = {
                         "lifetime": ws.cell(row_idx, 2).value or 0,
                         "session": ws.cell(row_idx, 3).value or 0,
-                        "daily": ws.cell(row_idx, 4).value or 0,
-                        "yesterday": ws.cell(row_idx, 5).value or 0,
-                        "monthly": ws.cell(row_idx, 6).value or 0,
+                        "daily": ws.cell(row_idx, 5).value or 0,
+                        "yesterday": ws.cell(row_idx, 7).value or 0,
+                        "monthly": ws.cell(row_idx, 9).value or 0,
                     }
                 
                 # Load user metadata
