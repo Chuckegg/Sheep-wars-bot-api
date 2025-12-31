@@ -129,7 +129,7 @@ class FileLock:
             except FileExistsError:
                 # Check for stale lock (older than 60 seconds)
                 try:
-                    if os.path.exists(self.lock_file) and time.time() - os.stat(self.lock_file).st_mtime > 60:
+                    if os.path.exists(self.lock_file) and time.time() - os.stat(self.lock_file).st_mtime > 300:
                         try:
                             os.remove(self.lock_file)
                         except OSError:
@@ -291,10 +291,9 @@ class StatsCache:
 STATS_CACHE = StatsCache()
 
 def safe_save_workbook(wb, filepath: str) -> bool:
-    """Safely save a workbook with backup and error recovery.
+    """Safely save a workbook using atomic write to prevent corruption.
     
-    Creates a backup before saving. If save fails, restores from backup.
-    Always ensures workbook is closed properly.
+    Writes to a temp file first, then atomically replaces the target file.
     
     Args:
         wb: The openpyxl Workbook object to save
@@ -303,26 +302,26 @@ def safe_save_workbook(wb, filepath: str) -> bool:
     Returns:
         bool: True if save succeeded, False otherwise
     """
+    temp_path = str(filepath) + ".tmp"
     backup_path = str(filepath) + ".backup"
-    backup_created = False
     
     try:
-        # Create backup if file exists
-        if os.path.exists(filepath):
+        # 1. Save to temporary file first
+        wb.save(temp_path)
+        
+        # 2. Create backup of existing file
+        if os.path.exists(str(filepath)):
             try:
-                shutil.copy2(filepath, backup_path)
-                backup_created = True
-                print(f"[BACKUP] Created backup: {backup_path}")
+                shutil.copy2(str(filepath), backup_path)
             except Exception as backup_err:
                 print(f"[WARNING] Failed to create backup: {backup_err}")
-                # Continue anyway - we'll try to save without backup
         
-        # Attempt to save
-        wb.save(str(filepath))
+        # 3. Atomic replace
+        os.replace(temp_path, str(filepath))
         print(f"[SAVE] Successfully saved: {filepath}")
         
-        # Remove backup after successful save
-        if backup_created and os.path.exists(backup_path):
+        # 4. Cleanup backup
+        if os.path.exists(backup_path):
             try:
                 os.remove(backup_path)
             except Exception:
@@ -332,14 +331,12 @@ def safe_save_workbook(wb, filepath: str) -> bool:
         
     except Exception as save_err:
         print(f"[ERROR] Failed to save workbook: {save_err}")
-        
-        # Try to restore from backup if save failed
-        if backup_created and os.path.exists(backup_path):
+        # Clean up temp file
+        if os.path.exists(temp_path):
             try:
-                shutil.copy2(backup_path, filepath)
-                print(f"[RESTORE] Restored from backup after save failure")
-            except Exception as restore_err:
-                print(f"[ERROR] Failed to restore from backup: {restore_err}")
+                os.remove(temp_path)
+            except:
+                pass
         
         return False
         
@@ -1117,7 +1114,7 @@ def create_stats_composite_image(level, icon, ign, tab_name, wins, losses, wl_ra
     header_card_w = (canvas_w - (margin * 2) - skin_w - (spacing * 2)) // 2
     
     skin_card = Image.new('RGBA', (skin_w, skin_h), (0, 0, 0, 0))
-    ImageDraw.Draw(skin_card).rounded_rectangle([0, 0, skin_w, skin_h], radius=15, fill=(35, 30, 45, 240))
+    ImageDraw.Draw(skin_card).rounded_rectangle([0, 0, skin_w-1, skin_h-1], radius=15, fill=(35, 30, 45, 240))
     if skin_image:
         skin = skin_image
     else:
@@ -1367,10 +1364,17 @@ def create_streaks_image(ign: str, level: int, icon: str, ign_color: str, guild_
 
     title_width = title_img.width
     title_height = title_img.height
-    content_width = max(title_width, line_width)
+    # Enforce minimum width and even width for symmetry
+    content_width = max(title_width, line_width, 800)
 
     composite_width = content_width + margin_x * 2
-    composite_height = title_height + spacing + grid_height + margin_y * 2
+    if composite_width % 2 != 0:
+        composite_width += 1
+    
+    # Adjust bottom margin to match visual top margin of text (title image has ~6px top padding)
+    visual_top_margin = margin_y + 6
+    margin_bottom = visual_top_margin
+    composite_height = title_height + spacing + grid_height + margin_y + margin_bottom
 
     composite = Image.new('RGBA', (composite_width, composite_height), (18, 18, 20, 255))
     composite.paste(title_img, ((composite_width - title_width) // 2, margin_y), title_img if title_img.mode == 'RGBA' else None)
@@ -2174,7 +2178,7 @@ def render_modern_card(label, value, width, height, color=(255, 255, 255), is_he
     img = Image.new('RGBA', (int(width), int(height)), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     card_bg = (35, 30, 45, 240) 
-    draw.rounded_rectangle([0, 0, width, height], radius=15, fill=card_bg)
+    draw.rounded_rectangle([0, 0, width-1, height-1], radius=15, fill=card_bg)
     font_label = _load_font("DejaVuSans-Bold.ttf", 14)
     font_value = _load_font("DejaVuSans-Bold.ttf", 28 if is_header else 24)
     l_text = f"{label.upper()}:"

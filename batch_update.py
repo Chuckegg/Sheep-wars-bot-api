@@ -30,7 +30,7 @@ class FileLock:
             except FileExistsError:
                 # Check for stale lock (older than 60 seconds)
                 try:
-                    if os.path.exists(self.lock_file) and time.time() - os.stat(self.lock_file).st_mtime > 60:
+                    if os.path.exists(self.lock_file) and time.time() - os.stat(self.lock_file).st_mtime > 300:
                         try:
                             os.remove(self.lock_file)
                         except OSError:
@@ -53,10 +53,9 @@ class FileLock:
 
 
 def safe_save_workbook(wb, filepath: str) -> bool:
-    """Safely save a workbook with backup and error recovery.
+    """Safely save a workbook using atomic write to prevent corruption.
     
-    Creates a backup before saving. If save fails, restores from backup.
-    Always ensures workbook is closed properly.
+    Writes to a temp file first, then atomically replaces the target file.
     
     Args:
         wb: The openpyxl Workbook object to save
@@ -65,26 +64,26 @@ def safe_save_workbook(wb, filepath: str) -> bool:
     Returns:
         bool: True if save succeeded, False otherwise
     """
-    backup_path = filepath + ".backup"
-    backup_created = False
+    temp_path = str(filepath) + ".tmp"
+    backup_path = str(filepath) + ".backup"
     
     try:
-        # Create backup if file exists
+        # 1. Save to temporary file first
+        wb.save(temp_path)
+        
+        # 2. Create backup of existing file
         if os.path.exists(filepath):
             try:
                 shutil.copy2(filepath, backup_path)
-                backup_created = True
-                print(f"[BACKUP] Created backup: {backup_path}", flush=True)
             except Exception as backup_err:
                 print(f"[WARNING] Failed to create backup: {backup_err}", flush=True)
-                # Continue anyway - we'll try to save without backup
         
-        # Attempt to save
-        wb.save(filepath)
+        # 3. Atomic replace
+        os.replace(temp_path, filepath)
         print(f"[SAVE] Successfully saved: {filepath}", flush=True)
         
-        # Remove backup after successful save
-        if backup_created and os.path.exists(backup_path):
+        # 4. Cleanup backup
+        if os.path.exists(backup_path):
             try:
                 os.remove(backup_path)
             except Exception:
@@ -94,14 +93,12 @@ def safe_save_workbook(wb, filepath: str) -> bool:
         
     except Exception as save_err:
         print(f"[ERROR] Failed to save workbook: {save_err}", flush=True)
-        
-        # Try to restore from backup if save failed
-        if backup_created and os.path.exists(backup_path):
+        # Clean up temp file
+        if os.path.exists(temp_path):
             try:
-                shutil.copy2(backup_path, filepath)
-                print(f"[RESTORE] Restored from backup after save failure", flush=True)
-            except Exception as restore_err:
-                print(f"[ERROR] Failed to restore from backup: {restore_err}", flush=True)
+                os.remove(temp_path)
+            except:
+                pass
         
         return False
         
@@ -181,7 +178,7 @@ def rotate_daily_to_yesterday() -> dict:
                 print("[ERROR] Failed to save Excel file after rotation", flush=True)
                 return {u: False for u in users}  # Mark all as failed
             
-            print(f"\n[SUMMARY] Rotated daily→yesterday for {sum(results.values())}/{len(users)} users", flush=True)
+            print(f"\n[SUMMARY] Rotated daily->yesterday for {sum(results.values())}/{len(users)} users", flush=True)
             return results
         
     except Exception as e:
@@ -236,7 +233,7 @@ def batch_update(schedule: str, api_key: str | None = None) -> dict:
     """
     # Special handling for 'yesterday' schedule - rotate daily→yesterday without API calls
     if schedule == 'yesterday':
-        print("[INFO] Running yesterday rotation (copying daily→yesterday snapshots)", flush=True)
+        print("[INFO] Running yesterday rotation (copying daily->yesterday snapshots)", flush=True)
         results = rotate_daily_to_yesterday()
         # Return results in the expected format
         return {username: (success, ['rotate']) for username, success in results.items()}

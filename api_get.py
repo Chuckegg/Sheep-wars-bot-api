@@ -33,7 +33,7 @@ class FileLock:
             except FileExistsError:
                 # Check for stale lock (older than 60 seconds)
                 try:
-                    if os.path.exists(self.lock_file) and time.time() - os.stat(self.lock_file).st_mtime > 60:
+                    if os.path.exists(self.lock_file) and time.time() - os.stat(self.lock_file).st_mtime > 300:
                         try:
                             os.remove(self.lock_file)
                         except OSError:
@@ -55,10 +55,9 @@ class FileLock:
                 pass
 
 def safe_save_workbook(wb, filepath: str) -> bool:
-    """Safely save a workbook with backup and error recovery.
+    """Safely save a workbook using atomic write to prevent corruption.
     
-    Creates a backup before saving. If save fails, restores from backup.
-    Always ensures workbook is closed properly.
+    Writes to a temp file first, then atomically replaces the target file.
     
     Args:
         wb: The openpyxl Workbook object to save
@@ -67,26 +66,27 @@ def safe_save_workbook(wb, filepath: str) -> bool:
     Returns:
         bool: True if save succeeded, False otherwise
     """
-    backup_path = filepath + ".backup"
-    backup_created = False
+    temp_path = str(filepath) + ".tmp"
+    backup_path = str(filepath) + ".backup"
     
     try:
-        # Create backup if file exists
+        # 1. Save to temporary file first (if this fails, original is untouched)
+        wb.save(temp_path)
+        
+        # 2. Create backup of existing file just in case
         if os.path.exists(filepath):
             try:
                 shutil.copy2(filepath, backup_path)
-                backup_created = True
-                print(f"[BACKUP] Created backup: {backup_path}")
             except Exception as backup_err:
                 print(f"[WARNING] Failed to create backup: {backup_err}")
-                # Continue anyway - we'll try to save without backup
         
-        # Attempt to save
-        wb.save(filepath)
+        # 3. Atomic replace: this is the critical step that prevents corruption
+        # os.replace is atomic on POSIX and Windows (Python 3.3+)
+        os.replace(temp_path, filepath)
         print(f"[SAVE] Successfully saved: {filepath}")
         
-        # Remove backup after successful save
-        if backup_created and os.path.exists(backup_path):
+        # 4. Cleanup backup
+        if os.path.exists(backup_path):
             try:
                 os.remove(backup_path)
             except Exception:
@@ -96,14 +96,12 @@ def safe_save_workbook(wb, filepath: str) -> bool:
         
     except Exception as save_err:
         print(f"[ERROR] Failed to save workbook: {save_err}")
-        
-        # Try to restore from backup if save failed
-        if backup_created and os.path.exists(backup_path):
+        # Clean up temp file
+        if os.path.exists(temp_path):
             try:
-                shutil.copy2(backup_path, filepath)
-                print(f"[RESTORE] Restored from backup after save failure")
-            except Exception as restore_err:
-                print(f"[ERROR] Failed to restore from backup: {restore_err}")
+                os.remove(temp_path)
+            except:
+                pass
         
         return False
         
@@ -527,9 +525,20 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
     try:
         uuid, proper_username = get_uuid(username)
         data = get_hypixel_player(uuid, api_key)
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 429:
-            print(f"[WARNING] Rate limited (429) for {username}. Attempting snapshot fallback.")
+    except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
+        should_fallback = False
+        if isinstance(e, requests.exceptions.HTTPError) and e.response is not None:
+            if e.response.status_code == 429:
+                print(f"[WARNING] Rate limited (429) for {username}. Attempting snapshot fallback.")
+                should_fallback = True
+            elif e.response.status_code >= 500:
+                print(f"[WARNING] API Server Error ({e.response.status_code}) for {username}. Attempting snapshot fallback.")
+                should_fallback = True
+        elif isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
+            print(f"[WARNING] Connection error for {username}: {e}. Attempting snapshot fallback.")
+            should_fallback = True
+
+        if should_fallback:
             snapshots_written = False
             wb = None
             with FileLock(LOCK_FILE):
@@ -615,8 +624,15 @@ def api_update_sheet(username: str, api_key: str, snapshot_sections: set[str] | 
                 "snapshots_written": snapshots_written,
             }
         else:
-            # Re-raise other HTTP errors
-            raise
+            # Non-recoverable error (e.g. 404)
+            print(f"[ERROR] API request failed for {username}: {e}")
+            return {
+                "skipped": True,
+                "reason": "api_error",
+                "error": str(e),
+                "username": username,
+                "snapshots_written": False,
+            }
     
     current = extract_wool_games_flat(data)
     if not current:
