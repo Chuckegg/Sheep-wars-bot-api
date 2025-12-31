@@ -3459,7 +3459,7 @@ def _load_leaderboard_data_from_excel(metric: str):
                     elif metric == "sheep_thrown":
                         val = stats_dict.get("sheep thrown", {}).get(period, 0)
                     elif metric == "magic_wool_hit":
-                        val = stats_dict.get("magic wool hit", {}).get(period, 0)
+                        val = stats_dict.get("magic_wool_hit", {}).get(period, 0)
                     elif metric == "playtime":
                         val = stats_dict.get("playtime", {}).get(period, 0)
                     else:
@@ -3525,39 +3525,39 @@ def _calculate_ratio_value_from_excel(stats_dict: dict, period: str, metric: str
             return round(kills / deaths, 2) if deaths > 0 else kills
         elif metric == "kills_per_game":
             kills = stats_dict.get("kills", {}).get(period, 0)
-            games = stats_dict.get("games played", {}).get(period, 0)
+            games = stats_dict.get("games_played", {}).get(period, 0)
             return round(kills / games, 2) if games > 0 else 0
         elif metric == "kills_per_win":
             kills = stats_dict.get("kills", {}).get(period, 0)
             wins = stats_dict.get("wins", {}).get(period, 0)
             return round(kills / wins, 2) if wins > 0 else 0
         elif metric == "damage_per_game":
-            damage = stats_dict.get("damage dealt", {}).get(period, 0)
-            games = stats_dict.get("games played", {}).get(period, 0)
+            damage = stats_dict.get("damage_dealt", {}).get(period, 0)
+            games = stats_dict.get("games_played", {}).get(period, 0)
             return round(damage / games, 2) if games > 0 else 0
         elif metric == "damage_per_sheep":
-            damage = stats_dict.get("damage dealt", {}).get(period, 0)
-            sheep = stats_dict.get("sheep thrown", {}).get(period, 0)
+            damage = stats_dict.get("damage_dealt", {}).get(period, 0)
+            sheep = stats_dict.get("sheep_thrown", {}).get(period, 0)
             return round(damage / sheep, 2) if sheep > 0 else 0
         elif metric == "wools_per_game":
-            wools = stats_dict.get("magic wool hit", {}).get(period, 0)
-            games = stats_dict.get("games played", {}).get(period, 0)
+            wools = stats_dict.get("magic_wool_hit", {}).get(period, 0)
+            games = stats_dict.get("games_played", {}).get(period, 0)
             return round(wools / games, 2) if games > 0 else 0
         elif metric == "void_kd_ratio":
-            void_kills = stats_dict.get("kills void", {}).get(period, 0)
-            void_deaths = stats_dict.get("deaths void", {}).get(period, 0)
+            void_kills = stats_dict.get("kills_void", {}).get(period, 0)
+            void_deaths = stats_dict.get("deaths_void", {}).get(period, 0)
             return round(void_kills / void_deaths, 2) if void_deaths > 0 else void_kills
         elif metric == "explosive_kd_ratio":
-            exp_kills = stats_dict.get("kills explosive", {}).get(period, 0)
-            exp_deaths = stats_dict.get("deaths explosive", {}).get(period, 0)
+            exp_kills = stats_dict.get("kills_explosive", {}).get(period, 0)
+            exp_deaths = stats_dict.get("deaths_explosive", {}).get(period, 0)
             return round(exp_kills / exp_deaths, 2) if exp_deaths > 0 else exp_kills
         elif metric == "bow_kd_ratio":
-            bow_kills = stats_dict.get("kills bow", {}).get(period, 0)
-            bow_deaths = stats_dict.get("deaths bow", {}).get(period, 0)
+            bow_kills = stats_dict.get("kills_bow", {}).get(period, 0)
+            bow_deaths = stats_dict.get("deaths_bow", {}).get(period, 0)
             return round(bow_kills / bow_deaths, 2) if bow_deaths > 0 else bow_kills
         elif metric == "melee_kd_ratio":
-            melee_kills = stats_dict.get("kills melee", {}).get(period, 0)
-            melee_deaths = stats_dict.get("deaths melee", {}).get(period, 0)
+            melee_kills = stats_dict.get("kills_melee", {}).get(period, 0)
+            melee_deaths = stats_dict.get("deaths_melee", {}).get(period, 0)
             return round(melee_kills / melee_deaths, 2) if melee_deaths > 0 else melee_kills
         elif metric == "exp_per_hour":
             exp = stats_dict.get("experience", {}).get(period, 0)
@@ -3566,7 +3566,7 @@ def _calculate_ratio_value_from_excel(stats_dict: dict, period: str, metric: str
             return round(exp / hours, 2) if hours > 0 else 0
         elif metric == "exp_per_game":
             exp = stats_dict.get("experience", {}).get(period, 0)
-            games = stats_dict.get("games played", {}).get(period, 0)
+            games = stats_dict.get("games_played", {}).get(period, 0)
             return round(exp / games, 2) if games > 0 else 0
         elif metric == "wins_per_hour":
             wins = stats_dict.get("wins", {}).get(period, 0)
@@ -3579,8 +3579,8 @@ def _calculate_ratio_value_from_excel(stats_dict: dict, period: str, metric: str
             hours = playtime / 3600
             return round(kills / hours, 2) if hours > 0 else 0
         elif metric == "sheeps_per_game":
-            sheep = stats_dict.get("sheep thrown", {}).get(period, 0)
-            games = stats_dict.get("games played", {}).get(period, 0)
+            sheep = stats_dict.get("sheep_thrown", {}).get(period, 0)
+            games = stats_dict.get("games_pulled", {}).get(period, 0)
             return round(sheep / games, 2) if games > 0 else 0
     except:
         return None
