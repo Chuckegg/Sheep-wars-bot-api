@@ -232,63 +232,39 @@ def get_rank_color(rank: Optional[str]) -> str:
 
 
 def save_user_color_and_rank(username: str, rank: Optional[str], guild_tag: Optional[str] = None, guild_color: Optional[str] = None):
-    """Save or update user's rank and guild info in user_colors.json.
+    """Save or update user's rank and guild info in database.
     
     Only assigns color automatically for NEW users based on their rank.
     Existing users keep their custom color.
-    
-    Structure: {"username_lowercase": {"color": "#FFFFFF", "rank": "MVP_PLUS", "guild_tag": "QUEBEC", "guild_color": "DARK_AQUA"}}
     """
-    colors_file = SCRIPT_DIR / "user_colors.json"
-    
-    # Load existing data
-    color_data = {}
-    if colors_file.exists():
-        try:
-            with open(colors_file, 'r') as f:
-                color_data = json.load(f)
-        except Exception:
-            pass
+    from db_helper import get_user_meta, update_user_meta
     
     username_key = username.lower()
     
-    # Check if user already exists
-    if username_key in color_data:
+    # Check if user already exists in database
+    existing_meta = get_user_meta(username_key)
+    
+    if existing_meta:
         # User exists - only update rank and guild info, preserve their color
-        existing_entry = color_data[username_key]
-        print(f"[DEBUG] User {username} already exists with data: {existing_entry}")
+        print(f"[DEBUG] User {username} already exists with data: {existing_meta}")
         
-        if isinstance(existing_entry, str):
-            # Old format (just color string), convert to new format
-            print(f"[DEBUG] Converting old format to new format, preserving color: {existing_entry}")
-            color_data[username_key] = {
-                "color": existing_entry, 
-                "rank": rank,
-                "guild_tag": guild_tag,
-                "guild_color": guild_color
-            }
-        else:
-            # New format, update rank and guild info, preserve color
-            old_color = existing_entry.get("color")
-            print(f"[DEBUG] Preserving existing color {old_color}, updating rank to {rank}, guild: {guild_tag}")
-            color_data[username_key]["rank"] = rank
-            color_data[username_key]["guild_tag"] = guild_tag
-            color_data[username_key]["guild_color"] = guild_color
+        old_color = existing_meta.get('ign_color')
+        print(f"[DEBUG] Preserving existing color {old_color}, updating rank to {rank}, guild: {guild_tag}")
+        
+        # Update only rank and guild, keep color
+        update_user_meta(username_key, 
+                        ign_color=old_color,
+                        guild_tag=guild_tag, 
+                        guild_hex=guild_color)
     else:
         # NEW USER - assign color based on rank automatically
         auto_color = get_rank_color(rank)
         print(f"[DEBUG] NEW USER {username} - assigning auto color {auto_color} for rank {rank}, guild: {guild_tag}")
-        color_data[username_key] = {
-            "color": auto_color, 
-            "rank": rank,
-            "guild_tag": guild_tag,
-            "guild_color": guild_color
-        }
-    
-    # Save back to file
-    print(f"[DEBUG] Saving to file: {username_key} -> {color_data[username_key]}")
-    with open(colors_file, 'w', encoding='utf-8') as f:
-        json.dump(color_data, f, indent=2, ensure_ascii=False)
+        
+        update_user_meta(username_key,
+                        ign_color=auto_color,
+                        guild_tag=guild_tag,
+                        guild_hex=guild_color)
 
 
 def api_update_database(username: str, api_key: str, snapshot_sections: set[str] | None = None):
@@ -400,7 +376,7 @@ def api_update_database(username: str, api_key: str, snapshot_sections: set[str]
         print(f"[DEBUG] Failed to fetch guild data: {e}")
         guild_tag, guild_color = None, None
 
-    # Extract and save player rank and guild info to user_colors.json
+    # Extract and save player rank and guild info to database
     rank = extract_player_rank(data)
     print(f"[DEBUG] Extracted rank for {proper_username}: {rank}")
     save_user_color_and_rank(proper_username, rank, guild_tag, guild_color)

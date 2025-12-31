@@ -11,7 +11,22 @@ from db_helper import (
     get_all_usernames,
     get_user_stats_with_deltas,
     get_user_meta,
-    user_exists
+    update_user_meta,
+    user_exists,
+    get_discord_id,
+    set_discord_link,
+    get_all_user_links,
+    get_default_username,
+    set_default_username,
+    get_all_default_users,
+    get_tracked_streaks,
+    update_tracked_streaks,
+    get_all_tracked_streaks,
+    add_tracked_user,
+    remove_tracked_user,
+    is_tracked_user,
+    get_tracked_users,
+    set_tracked_users
 )
 import re
 import shutil
@@ -33,11 +48,9 @@ except Exception:
 BOT_DIR = Path(__file__).parent.absolute()
 
 # tracked/users + creator info
-TRACKED_FILE = os.path.join(os.path.dirname(__file__), "tracked_users.txt")
-USER_LINKS_FILE = os.path.join(os.path.dirname(__file__), "user_links.json")
-USER_COLORS_FILE = os.path.join(os.path.dirname(__file__), "user_colors.json")
-DEFAULT_USERS_FILE = os.path.join(os.path.dirname(__file__), "default_users.json")
-TRACKED_STREAKS_FILE = os.path.join(os.path.dirname(__file__), "tracked_streaks.json")
+# TRACKED_FILE - now in database (tracked_users table)
+# JSON files are now replaced with database tables
+# USER_LINKS_FILE, USER_COLORS_FILE, DEFAULT_USERS_FILE, TRACKED_STREAKS_FILE - now in database
 CREATOR_NAME = "chuckegg"
 # Optionally set a numeric Discord user ID for direct DM (recommended for reliability)
 CREATOR_ID = "542467909549555734"
@@ -194,14 +207,8 @@ class StatsCache:
         """Load all user data from SQLite database."""
         cache = {}
         
-        # Load colors once
+        # No need to load colors separately - will get from database per user
         all_user_data = {}
-        if os.path.exists(USER_COLORS_FILE):
-            try:
-                with open(USER_COLORS_FILE, 'r') as f:
-                    all_user_data = json.load(f)
-            except:
-                pass
 
         try:
             # Get all usernames
@@ -270,12 +277,8 @@ class StatsCache:
             if not self.data:
                 self.data = {}
             
-            # Load colors/meta
+            # Get meta from database
             all_user_data = {}
-            if os.path.exists(USER_COLORS_FILE):
-                try:
-                    with open(USER_COLORS_FILE, 'r') as f: all_user_data = json.load(f)
-                except: pass
             
             # Calculate meta
             level = int(processed_stats.get('level', {}).get('lifetime', 0))
@@ -1945,32 +1948,12 @@ async def _send_paged_ansi_followups(interaction: discord.Interaction, lines: li
                 pass
 
 def load_tracked_users():
-    if not os.path.exists(TRACKED_FILE):
-        return []
-    with open(TRACKED_FILE, "r", encoding="utf-8") as f:
-        lines = [l.strip() for l in f.readlines() if l.strip()]
-    return lines
-
-def add_tracked_user(ign: str) -> bool:
-    users = load_tracked_users()
-    key = ign.casefold()
-    for u in users:
-        if u.casefold() == key:
-            return False
-    # append
-    with open(TRACKED_FILE, "a", encoding="utf-8") as f:
-        f.write(ign + "\n")
-    return True
+    return get_tracked_users()
 
 
 def load_tracked_streaks() -> dict:
-    if not os.path.exists(TRACKED_STREAKS_FILE):
-        return {}
     try:
-        with open(TRACKED_STREAKS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if isinstance(data, dict):
-                return data
+        return get_all_tracked_streaks()
     except Exception:
         pass
     return {}
@@ -1978,21 +1961,27 @@ def load_tracked_streaks() -> dict:
 
 def save_tracked_streaks(data: dict):
     try:
-        with open(TRACKED_STREAKS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        for username, streak_data in data.items():
+            update_tracked_streaks(username, streak_data)
     except Exception as e:
-        print(f"[STREAK] Failed to save streaks file: {e}")
+        print(f"[STREAK] Failed to save streaks to database: {e}")
 
 
 def load_user_colors() -> dict:
-    """Load user colors and metadata from user_colors.json"""
-    if not os.path.exists(USER_COLORS_FILE):
-        return {}
+    """Load user colors and metadata from database"""
     try:
-        with open(USER_COLORS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if isinstance(data, dict):
-                return data
+        result = {}
+        usernames = get_all_usernames()
+        for username in usernames:
+            meta = get_user_meta(username)
+            if meta:
+                # Convert database format to expected format
+                result[username.lower()] = {
+                    'color': meta.get('ign_color'),
+                    'guild_tag': meta.get('guild_tag'),
+                    'guild_color': meta.get('guild_hex')
+                }
+        return result
     except Exception:
         pass
     return {}
@@ -2070,19 +2059,16 @@ def initialize_streak_entry(username: str, processed_stats: dict):
     save_tracked_streaks(streaks)
 
 def load_user_links():
-    """Load username -> Discord user ID mappings from JSON file"""
-    if not os.path.exists(USER_LINKS_FILE):
-        return {}
+    """Load username -> Discord user ID mappings from database"""
     try:
-        with open(USER_LINKS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        return get_all_user_links()
     except Exception:
         return {}
 
 def save_user_links(links: dict):
-    """Save username -> Discord user ID mappings to JSON file"""
-    with open(USER_LINKS_FILE, "w", encoding="utf-8") as f:
-        json.dump(links, f, indent=2)
+    """Save username -> Discord user ID mappings to database"""
+    for username, discord_id in links.items():
+        set_discord_link(username, discord_id)
 
 def link_user_to_ign(discord_user_id: int, ign: str):
     """Link a Discord user ID to a Minecraft username (case-insensitive)"""
@@ -2105,24 +2091,6 @@ def is_admin(user: Union[discord.User, discord.Member]) -> bool:
         return True
     return False
 
-def remove_tracked_user(ign: str) -> bool:
-    """Remove a username from tracked users list"""
-    users = load_tracked_users()
-    key = ign.casefold()
-    found = False
-    new_users = []
-    for u in users:
-        if u.casefold() == key:
-            found = True
-        else:
-            new_users.append(u)
-    
-    if found:
-        with open(TRACKED_FILE, "w", encoding="utf-8") as f:
-            for u in new_users:
-                f.write(u + "\n")
-    return found
-
 def unlink_user_from_ign(ign: str) -> bool:
     """Remove username -> Discord user ID link"""
     links = load_user_links()
@@ -2134,18 +2102,11 @@ def unlink_user_from_ign(ign: str) -> bool:
     return False
 
 def remove_user_color(ign: str) -> bool:
-    """Remove username from user_colors.json"""
+    """Remove username color from database"""
     try:
-        if not os.path.exists(USER_COLORS_FILE):
-            return False
-        with open(USER_COLORS_FILE, 'r') as f:
-            color_data = json.load(f)
-        
-        key = ign.casefold()
-        if key in color_data:
-            del color_data[key]
-            with open(USER_COLORS_FILE, 'w') as f:
-                json.dump(color_data, f, indent=2)
+        meta = get_user_meta(ign)
+        if meta and meta.get('ign_color'):
+            update_user_meta(ign, ign_color=None)
             return True
         return False
     except Exception as e:
@@ -2265,17 +2226,14 @@ def get_player_status(ign):
 
 # ---- Default IGN helpers ----
 def load_default_users() -> dict:
-    if not os.path.exists(DEFAULT_USERS_FILE):
-        return {}
     try:
-        with open(DEFAULT_USERS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        return get_all_default_users()
     except Exception:
         return {}
 
 def save_default_users(defaults: dict):
-    with open(DEFAULT_USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(defaults, f, indent=2)
+    for discord_id, username in defaults.items():
+        set_default_username(discord_id, username)
 
 def set_default_user(discord_user_id: int, ign: str):
     defaults = load_default_users()
@@ -2314,11 +2272,11 @@ async def cleanup_untracked_user_delayed(ign: str, delay_seconds: int = 60):
         for tracked_user in tracked_users:
             if tracked_user.casefold() == key:
                 # User is now tracked, don't clean up
-                print(f"[CLEANUP] SKIPPING cleanup for '{ign}' - found in tracked_users.txt as '{tracked_user}'")
+                print(f"[CLEANUP] SKIPPING cleanup for '{ign}' - found in tracked users database as '{tracked_user}'")
                 return
         
         # User is still untracked, proceed with cleanup
-        print(f"[CLEANUP] User '{ign}' NOT FOUND in tracked_users.txt")
+        print(f"[CLEANUP] User '{ign}' NOT FOUND in tracked users database")
         print(f"[CLEANUP] Reason: User was queried via /sheepwars but is not in tracked list")
         print(f"[CLEANUP] Proceeding with cleanup: removing color data and deleting sheet")
         
@@ -2745,16 +2703,13 @@ class StatsTabView(discord.ui.View):
         self.update_button_styles()
 
     def _load_color(self):
-        if os.path.exists(USER_COLORS_FILE):
-            try:
-                with open(USER_COLORS_FILE, 'r') as f:
-                    data = json.load(f).get(self.ign.lower(), {})
-                    if isinstance(data, dict):
-                        self.ign_color = data.get('color')
-                        self.guild_tag = data.get('guild_tag')
-                        g_color_text = str(data.get('guild_color', 'GRAY')).upper()
-                        self.guild_hex = MINECRAFT_NAME_TO_HEX.get(g_color_text, "#AAAAAA")
-            except: pass
+        try:
+            meta = get_user_meta(self.ign)
+            if meta:
+                self.ign_color = meta.get('ign_color')
+                self.guild_tag = meta.get('guild_tag')
+                self.guild_hex = meta.get('guild_hex') or "#AAAAAA"
+        except: pass
 
     def update_button_styles(self):
         """Setzt den aktiven Button auf Blau (Primary) und andere auf Grau (Secondary)."""
@@ -2820,22 +2775,17 @@ class StatsFullView(discord.ui.View):
         self.update_buttons()
 
     def _load_color(self):
-        """Load or reload the color and guild info for this username from user_colors.json"""
+        """Load or reload the color and guild info for this username from database"""
         self.ign_color = None
         self.guild_tag = None
         self.guild_color = None
         try:
-            if os.path.exists(USER_COLORS_FILE):
-                with open(USER_COLORS_FILE, 'r') as f:
-                    color_data = json.load(f)
-                    user_entry = color_data.get(self.ign.lower())
-                    if isinstance(user_entry, str):
-                        self.ign_color = user_entry
-                    elif isinstance(user_entry, dict):
-                        self.ign_color = user_entry.get('color')
-                        self.guild_tag = user_entry.get('guild_tag')
-                        self.guild_color = user_entry.get('guild_color')
-                    print(f"[DEBUG] Loaded color for {self.ign}: {self.ign_color}, guild: [{self.guild_tag}] ({self.guild_color})")
+            meta = get_user_meta(self.ign)
+            if meta:
+                self.ign_color = meta.get('ign_color')
+                self.guild_tag = meta.get('guild_tag')
+                self.guild_color = meta.get('guild_hex')
+                print(f"[DEBUG] Loaded color for {self.ign}: {self.ign_color}, guild: [{self.guild_tag}] ({self.guild_color})")
         except Exception as e:
             print(f"[WARNING] Failed to load color for {self.ign}: {e}")
 
@@ -3202,14 +3152,11 @@ class LeaderboardView(discord.ui.View):
         # Load user colors
         self.user_colors = {}
         try:
-            if os.path.exists(USER_COLORS_FILE):
-                with open(USER_COLORS_FILE, 'r') as f:
-                    color_data = json.load(f)
-                    for username, user_entry in color_data.items():
-                        if isinstance(user_entry, str):
-                            self.user_colors[username] = user_entry
-                        elif isinstance(user_entry, dict):
-                            self.user_colors[username] = user_entry.get('color')
+            usernames = get_all_usernames()
+            for username in usernames:
+                meta = get_user_meta(username)
+                if meta and meta.get('ign_color'):
+                    self.user_colors[username.lower()] = meta.get('ign_color')
         except Exception as e:
             print(f"[WARNING] Failed to load user colors: {e}")
 
@@ -4066,7 +4013,7 @@ async def track(interaction: discord.Interaction, ign: str):
             return
     
     try:
-        # Check if user is already in tracked_users.txt
+        # Check if user is already in tracked users database
         tracked_users = load_tracked_users()
         key = ign.casefold()
         for tracked_user in tracked_users:
@@ -4495,32 +4442,12 @@ async def color(interaction: discord.Interaction, ign: str = None, color: discor
         return
     
     try:
-        # Load or create color preferences
-        color_data = {}
-        if os.path.exists(USER_COLORS_FILE):
-            with open(USER_COLORS_FILE, 'r') as f:
-                color_data = json.load(f)
-        
         # Get hex color from code
         color_code = color.value
         hex_color = MINECRAFT_CODE_TO_HEX.get(color_code, '#FFFFFF')
         
-        # Store the color preference with new structure
-        username_key = ign.lower()
-        if username_key in color_data:
-            # Update existing entry, preserve rank if it exists
-            if isinstance(color_data[username_key], dict):
-                color_data[username_key]['color'] = hex_color
-            else:
-                # Old format, convert to new format
-                color_data[username_key] = {'color': hex_color, 'rank': None}
-        else:
-            # New entry
-            color_data[username_key] = {'color': hex_color, 'rank': None}
-        
-        # Save to file
-        with open(USER_COLORS_FILE, 'w') as f:
-            json.dump(color_data, f, indent=2)
+        # Update color in database
+        update_user_meta(ign, ign_color=hex_color)
         
         await interaction.followup.send(f"Successfully set {ign}'s username color to {color.name}!", ephemeral=True)
         

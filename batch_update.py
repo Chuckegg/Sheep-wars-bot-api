@@ -5,19 +5,15 @@ import argparse
 from pathlib import Path
 
 # Import database helper
-from db_helper import rotate_daily_to_yesterday
+from db_helper import rotate_daily_to_yesterday, get_tracked_users
 
 SCRIPT_DIR = Path(__file__).parent.absolute()
-TRACKED_FILE = str(SCRIPT_DIR / "tracked_users.txt")
+# TRACKED_FILE = str(SCRIPT_DIR / "tracked_users.txt")  # Now using database
 
 
 def load_tracked_users() -> list[str]:
-    """Load tracked usernames from tracked_users.txt."""
-    if not os.path.exists(TRACKED_FILE):
-        return []
-    with open(TRACKED_FILE, "r", encoding="utf-8") as f:
-        lines = [l.strip() for l in f.readlines() if l.strip()]
-    return lines
+    """Load tracked usernames from database."""
+    return get_tracked_users()
 
 
 def run_api_get(username: str, api_key: str, snapshot_flags: list[str]) -> bool:

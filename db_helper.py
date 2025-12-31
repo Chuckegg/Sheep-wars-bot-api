@@ -68,9 +68,48 @@ def init_database(db_path: Optional[Path] = None):
             )
         ''')
         
+        # User links table - maps usernames to Discord IDs
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_links (
+                username TEXT PRIMARY KEY,
+                discord_id TEXT NOT NULL
+            )
+        ''')
+        
+        # Default users table - maps Discord IDs to default usernames
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS default_users (
+                discord_id TEXT PRIMARY KEY,
+                username TEXT NOT NULL
+            )
+        ''')
+        
+        # Tracked streaks table - stores winstreaks and killstreaks
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS tracked_streaks (
+                username TEXT PRIMARY KEY,
+                winstreak INTEGER DEFAULT 0,
+                killstreak INTEGER DEFAULT 0,
+                last_wins INTEGER DEFAULT 0,
+                last_losses INTEGER DEFAULT 0,
+                last_kills INTEGER DEFAULT 0,
+                last_deaths INTEGER DEFAULT 0
+            )
+        ''')
+        
+        # Tracked users table - list of users being actively tracked
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS tracked_users (
+                username TEXT PRIMARY KEY,
+                added_at INTEGER DEFAULT (strftime('%s', 'now'))
+            )
+        ''')
+        
         # Create indexes for faster lookups
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_username ON user_stats(username)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_stat_name ON user_stats(stat_name)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_discord_id ON user_links(discord_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_default_discord ON default_users(discord_id)')
         
         conn.commit()
 
@@ -379,3 +418,262 @@ def backup_database(backup_path: Path) -> bool:
     except Exception as e:
         print(f"[ERROR] Database backup failed: {e}")
         return False
+
+
+# ============================================================================
+# User Links Functions (username <-> Discord ID mappings)
+# ============================================================================
+
+def get_discord_id(username: str) -> Optional[str]:
+    """Get Discord ID for a username.
+    
+    Args:
+        username: Minecraft username
+        
+    Returns:
+        Discord ID or None if not found
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT discord_id FROM user_links WHERE LOWER(username) = LOWER(?)', (username,))
+        row = cursor.fetchone()
+        return row['discord_id'] if row else None
+
+
+def set_discord_link(username: str, discord_id: str):
+    """Link a username to a Discord ID.
+    
+    Args:
+        username: Minecraft username
+        discord_id: Discord user ID
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO user_links (username, discord_id)
+            VALUES (?, ?)
+            ON CONFLICT(username) DO UPDATE SET discord_id = excluded.discord_id
+        ''', (username.lower(), discord_id))
+        conn.commit()
+
+
+def get_all_user_links() -> Dict[str, str]:
+    """Get all username -> Discord ID mappings.
+    
+    Returns:
+        Dictionary mapping usernames to Discord IDs
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT username, discord_id FROM user_links')
+        return {row['username']: row['discord_id'] for row in cursor.fetchall()}
+
+
+# ============================================================================
+# Default Users Functions (Discord ID -> default username mappings)
+# ============================================================================
+
+def get_default_username(discord_id: str) -> Optional[str]:
+    """Get default username for a Discord ID.
+    
+    Args:
+        discord_id: Discord user ID
+        
+    Returns:
+        Username or None if not found
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT username FROM default_users WHERE discord_id = ?', (discord_id,))
+        row = cursor.fetchone()
+        return row['username'] if row else None
+
+
+def set_default_username(discord_id: str, username: str):
+    """Set default username for a Discord ID.
+    
+    Args:
+        discord_id: Discord user ID
+        username: Minecraft username
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO default_users (discord_id, username)
+            VALUES (?, ?)
+            ON CONFLICT(discord_id) DO UPDATE SET username = excluded.username
+        ''', (discord_id, username))
+        conn.commit()
+
+
+def get_all_default_users() -> Dict[str, str]:
+    """Get all Discord ID -> username mappings.
+    
+    Returns:
+        Dictionary mapping Discord IDs to usernames
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT discord_id, username FROM default_users')
+        return {row['discord_id']: row['username'] for row in cursor.fetchall()}
+
+
+# ============================================================================
+# Tracked Streaks Functions
+# ============================================================================
+
+def get_tracked_streaks(username: str) -> Optional[Dict]:
+    """Get streak tracking data for a username.
+    
+    Args:
+        username: Minecraft username
+        
+    Returns:
+        Dictionary with streak data or None if not found
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT winstreak, killstreak, last_wins, last_losses, last_kills, last_deaths
+            FROM tracked_streaks WHERE username = ?
+        ''', (username,))
+        row = cursor.fetchone()
+        if row:
+            return {
+                'winstreak': row['winstreak'],
+                'killstreak': row['killstreak'],
+                'last_wins': row['last_wins'],
+                'last_losses': row['last_losses'],
+                'last_kills': row['last_kills'],
+                'last_deaths': row['last_deaths']
+            }
+        return None
+
+
+def update_tracked_streaks(username: str, streak_data: Dict):
+    """Update streak tracking data for a username.
+    
+    Args:
+        username: Minecraft username
+        streak_data: Dictionary with streak data
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO tracked_streaks 
+            (username, winstreak, killstreak, last_wins, last_losses, last_kills, last_deaths)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(username) DO UPDATE SET
+                winstreak = excluded.winstreak,
+                killstreak = excluded.killstreak,
+                last_wins = excluded.last_wins,
+                last_losses = excluded.last_losses,
+                last_kills = excluded.last_kills,
+                last_deaths = excluded.last_deaths
+        ''', (
+            username,
+            streak_data.get('winstreak', 0),
+            streak_data.get('killstreak', 0),
+            streak_data.get('last_wins', 0),
+            streak_data.get('last_losses', 0),
+            streak_data.get('last_kills', 0),
+            streak_data.get('last_deaths', 0)
+        ))
+        conn.commit()
+
+
+def get_all_tracked_streaks() -> Dict[str, Dict]:
+    """Get all tracked streaks.
+    
+    Returns:
+        Dictionary mapping usernames to streak data
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT username, winstreak, killstreak, last_wins, last_losses, last_kills, last_deaths
+            FROM tracked_streaks
+        ''')
+        result = {}
+        for row in cursor.fetchall():
+            result[row['username']] = {
+                'winstreak': row['winstreak'],
+                'killstreak': row['killstreak'],
+                'last_wins': row['last_wins'],
+                'last_losses': row['last_losses'],
+                'last_kills': row['last_kills'],
+                'last_deaths': row['last_deaths']
+            }
+        return result
+
+
+# ============================================================================
+# Tracked Users Functions
+# ============================================================================
+
+def add_tracked_user(username: str):
+    """Add a username to tracked users.
+    
+    Args:
+        username: Minecraft username to track
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR IGNORE INTO tracked_users (username)
+            VALUES (?)
+        ''', (username,))
+        conn.commit()
+
+
+def remove_tracked_user(username: str):
+    """Remove a username from tracked users.
+    
+    Args:
+        username: Minecraft username to stop tracking
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM tracked_users WHERE username = ?', (username,))
+        conn.commit()
+
+
+def is_tracked_user(username: str) -> bool:
+    """Check if a username is being tracked.
+    
+    Args:
+        username: Minecraft username
+        
+    Returns:
+        True if user is tracked, False otherwise
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT 1 FROM tracked_users WHERE LOWER(username) = LOWER(?)', (username,))
+        return cursor.fetchone() is not None
+
+
+def get_tracked_users() -> List[str]:
+    """Get list of all tracked usernames.
+    
+    Returns:
+        List of tracked usernames
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT username FROM tracked_users ORDER BY username')
+        return [row['username'] for row in cursor.fetchall()]
+
+
+def set_tracked_users(usernames: List[str]):
+    """Replace all tracked users with new list.
+    
+    Args:
+        usernames: List of usernames to track
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM tracked_users')
+        for username in usernames:
+            cursor.execute('INSERT OR IGNORE INTO tracked_users (username) VALUES (?)', (username,))
+        conn.commit()
