@@ -2205,7 +2205,7 @@ def verify_api_key():
 
     print("[STARTUP] Verifying Hypixel API key...")
     try:
-        r = requests.get("https://api.hypixel.net/key", headers={"API-Key": key}, timeout=10)
+        r = requests.get("https://api.hypixel.net/v2/key", headers={"API-Key": key}, timeout=10)
         if r.status_code == 200:
             data = r.json()
             if data.get('success'):
