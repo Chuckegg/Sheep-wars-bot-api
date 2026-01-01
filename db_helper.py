@@ -289,27 +289,63 @@ def get_user_stats_with_deltas(username: str) -> Dict[str, Dict[str, float]]:
         return stats
 
 
-def update_user_meta(username: str, level: int = 0, icon: str = '',
+def update_user_meta(username: str, level: Optional[int] = None, icon: Optional[str] = None,
                     ign_color: Optional[str] = None,
                     guild_tag: Optional[str] = None,
                     guild_hex: Optional[str] = None):
     """Update user metadata.
     
-    Args:
-        username: Username to update
-        level: User level
-        icon: Prestige icon
-        ign_color: IGN color hex code
-        guild_tag: Guild tag
-        guild_hex: Guild color hex code
+    None values are ignored (existing values preserved).
+    To clear a text value (color/guild), pass an empty string "".
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO user_meta 
-            (username, level, icon, ign_color, guild_tag, guild_hex)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (username, level, icon, ign_color, guild_tag, guild_hex))
+        
+        # Check if user exists
+        cursor.execute('SELECT * FROM user_meta WHERE username = ?', (username,))
+        row = cursor.fetchone()
+        
+        if row:
+            # Update existing record - only update fields that are not None
+            updates = []
+            params = []
+            
+            if level is not None:
+                updates.append("level = ?")
+                params.append(level)
+            if icon is not None:
+                updates.append("icon = ?")
+                params.append(icon)
+            if ign_color is not None:
+                updates.append("ign_color = ?")
+                params.append(ign_color if ign_color != "" else None)
+            if guild_tag is not None:
+                updates.append("guild_tag = ?")
+                val = guild_tag if guild_tag != "" else None
+                params.append(str(val) if val is not None else None)
+            if guild_hex is not None:
+                updates.append("guild_hex = ?")
+                params.append(guild_hex if guild_hex != "" else None)
+            
+            if updates:
+                params.append(username)
+                sql = f"UPDATE user_meta SET {', '.join(updates)} WHERE username = ?"
+                cursor.execute(sql, params)
+        else:
+            # Insert new record
+            cursor.execute('''
+                INSERT INTO user_meta 
+                (username, level, icon, ign_color, guild_tag, guild_hex)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                username, 
+                level if level is not None else 0, 
+                icon if icon is not None else '', 
+                ign_color if ign_color != "" else None, 
+                str(guild_tag) if guild_tag and guild_tag != "" else None, 
+                guild_hex if guild_hex != "" else None
+            ))
+        
         conn.commit()
 
 
@@ -360,7 +396,7 @@ def user_exists(username: str) -> bool:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT COUNT(*) FROM user_stats WHERE username = ?
+            SELECT COUNT(*) FROM user_stats WHERE LOWER(username) = LOWER(?)
         ''', (username,))
         count = cursor.fetchone()[0]
         return count > 0
@@ -374,8 +410,8 @@ def delete_user(username: str):
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('DELETE FROM user_stats WHERE username = ?', (username,))
-        cursor.execute('DELETE FROM user_meta WHERE username = ?', (username,))
+        cursor.execute('DELETE FROM user_stats WHERE LOWER(username) = LOWER(?)', (username,))
+        cursor.execute('DELETE FROM user_meta WHERE LOWER(username) = LOWER(?)', (username,))
         conn.commit()
 
 
@@ -631,11 +667,15 @@ def remove_tracked_user(username: str):
     
     Args:
         username: Minecraft username to stop tracking
+        
+    Returns:
+        bool: True if user was removed, False if not found
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('DELETE FROM tracked_users WHERE username = ?', (username,))
+        cursor.execute('DELETE FROM tracked_users WHERE LOWER(username) = LOWER(?)', (username,))
         conn.commit()
+        return cursor.rowcount > 0
 
 
 def is_tracked_user(username: str) -> bool:

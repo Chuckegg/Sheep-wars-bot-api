@@ -8,7 +8,9 @@ import os
 
 # Database imports
 from db_helper import (
+    init_database,
     get_all_usernames,
+    get_database_stats,
     get_user_stats_with_deltas,
     get_user_meta,
     update_user_meta,
@@ -206,9 +208,6 @@ class StatsCache:
     def _load_from_database(self):
         """Load all user data from SQLite database."""
         cache = {}
-        
-        # No need to load colors separately - will get from database per user
-        all_user_data = {}
 
         try:
             # Get all usernames
@@ -232,22 +231,10 @@ class StatsCache:
                     if level == 0 and 'experience' in stats:
                         level = int(stats['experience']['lifetime'] / 5000)
                     
-                    # Get user color info
-                    user_info = all_user_data.get(username.lower(), {})
-                    if isinstance(user_info, str):
-                        ign_color, g_tag, g_hex = user_info, None, "#AAAAAA"
-                    else:
-                        ign_color = user_info.get('color', '#FFFFFF')
-                        g_tag = user_info.get('guild_tag')
-                        raw_g = str(user_info.get('guild_color', 'GRAY')).upper()
-                        g_hex = raw_g if raw_g.startswith('#') else MINECRAFT_NAME_TO_HEX.get(raw_g, "#AAAAAA")
-                    
-                    # Override with database metadata if available
-                    if meta_db:
-                        if meta_db.get('guild_tag'):
-                            g_tag = meta_db['guild_tag']
-                        if meta_db.get('guild_hex'):
-                            g_hex = meta_db['guild_hex']
+                    # Get user color info from database
+                    ign_color = meta_db.get('ign_color', '#FFFFFF') if meta_db else '#FFFFFF'
+                    g_tag = meta_db.get('guild_tag') if meta_db else None
+                    g_hex = meta_db.get('guild_hex', '#AAAAAA') if meta_db else '#AAAAAA'
                     
                     user_cache["meta"] = {
                         "level": level,
@@ -277,25 +264,21 @@ class StatsCache:
             if not self.data:
                 self.data = {}
             
-            # Get meta from database
-            all_user_data = {}
+            # Get meta from database to ensure colors/guilds are preserved
+            meta_db = get_user_meta(username)
             
             # Calculate meta
             level = int(processed_stats.get('level', {}).get('lifetime', 0))
             if level == 0 and 'experience' in processed_stats:
                 level = int(processed_stats['experience']['lifetime'] / 5000)
             
-            user_info = all_user_data.get(username.lower(), {})
-            if isinstance(user_info, str):
-                ign_color, g_tag, g_hex = user_info, None, "#AAAAAA"
-            else:
-                ign_color = user_info.get('color', '#FFFFFF')
-                g_tag = user_info.get('guild_tag')
-                raw_g = str(user_info.get('guild_color', 'GRAY')).upper()
-                g_hex = raw_g if raw_g.startswith('#') else MINECRAFT_NAME_TO_HEX.get(raw_g, "#AAAAAA")
+            ign_color = meta_db.get('ign_color', '#FFFFFF') if meta_db else '#FFFFFF'
+            g_tag = meta_db.get('guild_tag') if meta_db else None
+            g_hex = meta_db.get('guild_hex', '#AAAAAA') if meta_db else '#AAAAAA'
 
             # Update cache
-            self.data[username] = {"stats": processed_stats, "meta": {"level": level, "icon": get_prestige_icon(level), "ign_color": ign_color, "guild_tag": g_tag, "guild_hex": g_hex, "username": username}}
+            user_cache = {"stats": processed_stats, "meta": {"level": level, "icon": get_prestige_icon(level), "ign_color": ign_color, "guild_tag": g_tag, "guild_hex": g_hex, "username": username}}
+            self.data[username] = user_cache
 
             # Update streaks if applicable
             try:
@@ -306,6 +289,8 @@ class StatsCache:
             # Update mtime to prevent the next get_data call from reloading
             if self.db_path.exists():
                 self.last_mtime = self.db_path.stat().st_mtime
+            
+            return user_cache
 
     async def refresh(self):
         """Force reload of cache from database."""
@@ -1178,11 +1163,15 @@ def create_stats_composite_image(level, icon, ign, tab_name, wins, losses, wl_ra
     
     g_rgb = (255, 255, 255)
     if guild_hex:
+        # Handle Minecraft color names (e.g. "DARK_AQUA")
+        if str(guild_hex).upper() in MINECRAFT_NAME_TO_HEX:
+            guild_hex = MINECRAFT_NAME_TO_HEX[str(guild_hex).upper()]
+            
         try:
             g_rgb = tuple(int(str(guild_hex).lstrip('#')[j:j+2], 16) for j in (0, 2, 4))
         except:
             g_rgb = (170, 170, 170)
-    c5 = render_modern_card("Guild", f"{guild_tag if guild_tag else 'None'}", header_card_w, 85, color=g_rgb)
+    c5 = render_modern_card("Guild", f"{str(guild_tag) if guild_tag else 'None'}", header_card_w, 85, color=g_rgb)
     c6 = render_modern_card("Status", status_text, header_card_w, 85, color=status_color)
 
     for i, card in enumerate([c1, c2, c3]):
@@ -1508,7 +1497,7 @@ def create_leaderboard_image(tab_name: str, metric_label: str, leaderboard_data:
                 g_rgb = tuple(int(str(g_hex).lstrip('#')[j:j+2], 16) for j in (0, 2, 4))
             except:
                 g_rgb = (170, 170, 170)
-            draw.text((g_x, y + 15), f"[{g_tag}]", font=font_name, fill=g_rgb)
+            draw.text((g_x, y + 15), f"[{str(g_tag)}]", font=font_name, fill=g_rgb)
         
         # Value
         if is_playtime:
@@ -2106,7 +2095,7 @@ def remove_user_color(ign: str) -> bool:
     try:
         meta = get_user_meta(ign)
         if meta and meta.get('ign_color'):
-            update_user_meta(ign, ign_color=None)
+            update_user_meta(ign, ign_color="")
             return True
         return False
     except Exception as e:
@@ -2144,17 +2133,46 @@ def render_modern_card(label, value, width, height, color=(255, 255, 255), is_he
     draw.text((width // 2, int(height * 0.6)), v_text, font=font_value, fill=color, anchor="mm")
     return img
 
-def get_player_body(ign):
-    # Resolve UUID for better API support
-    identifier = ign
+_UUID_CACHE = {}
+
+def get_uuid(ign: str) -> Optional[str]:
+    ign_lower = ign.lower()
+    if ign_lower in _UUID_CACHE:
+        return _UUID_CACHE[ign_lower]
+    
+    headers = {"User-Agent": "SheepWarsBot/1.0"}
+    
+    # Try Mojang
     try:
-        r = requests.get(f"https://api.mojang.com/users/profiles/minecraft/{ign}", timeout=2)
+        r = requests.get(f"https://api.mojang.com/users/profiles/minecraft/{ign}", headers=headers, timeout=2)
         if r.status_code == 200:
             data = r.json()
-            if 'id' in data:
-                identifier = data['id']
-    except Exception:
+            uuid = data.get('id')
+            if uuid:
+                _UUID_CACHE[ign_lower] = uuid
+                return uuid
+    except:
         pass
+        
+    # Try PlayerDB
+    try:
+        r = requests.get(f"https://playerdb.co/api/player/minecraft/{ign}", headers=headers, timeout=2)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get('success'):
+                uuid = data.get('data', {}).get('player', {}).get('raw_id')
+                if uuid:
+                    _UUID_CACHE[ign_lower] = uuid
+                    return uuid
+    except:
+        pass
+        
+    return None
+
+def get_player_body(ign):
+    # Resolve UUID for better API support
+    uuid = get_uuid(ign)
+    identifier = uuid if uuid else ign
 
     # Try multiple providers to find one that works/updates
     # Using random param to bypass edge caching where possible
@@ -2164,7 +2182,7 @@ def get_player_body(ign):
     ]
     for url in providers:
         try:
-            r = requests.get(url, timeout=5)
+            r = requests.get(url, headers={"User-Agent": "SheepWarsBot/1.0"}, timeout=5)
             if r.status_code == 200:
                 return Image.open(io.BytesIO(r.content)).convert("RGBA")
         except Exception:
@@ -2178,6 +2196,78 @@ def get_api_key():
     except:
         return None
 
+def verify_api_key():
+    """Verify Hypixel API key validity on startup."""
+    key = get_api_key()
+    if not key:
+        print("[STARTUP] [ERROR] API_KEY.txt not found or empty!")
+        return
+
+    print("[STARTUP] Verifying Hypixel API key...")
+    try:
+        r = requests.get("https://api.hypixel.net/v2/key", headers={"API-Key": key}, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get('success'):
+                record = data.get('record', {})
+                owner = record.get('owner')
+                limit = record.get('limit')
+                print(f"[STARTUP] [OK] API Key verified! Owner UUID: {owner}, Limit: {limit}")
+                return
+        
+        print(f"[STARTUP] [WARNING] API Key verification failed. Status: {r.status_code}")
+    except Exception as e:
+        print(f"[STARTUP] [ERROR] Failed to connect to Hypixel API: {e}")
+
+async def check_legacy_migration():
+    """Check if legacy files exist and database is empty, then migrate."""
+    # Check if we need to migrate stats.xlsx
+    db_stats = get_database_stats()
+    if db_stats['users'] == 0:
+        excel_file = BOT_DIR / "stats.xlsx"
+        if excel_file.exists():
+            print("[MIGRATION] Database empty but stats.xlsx found. Running conversion...")
+            try:
+                # Run convert_to_db.py with --force to skip prompt
+                subprocess.run([sys.executable, "convert_to_db.py", "--force"], cwd=str(BOT_DIR), check=True)
+                print("[MIGRATION] Conversion script finished.")
+                # Force cache refresh after migration
+                await STATS_CACHE.refresh()
+            except Exception as e:
+                print(f"[ERROR] Migration failed: {e}")
+
+    # Check for JSON files migration (user_links, default_users, tracked_streaks)
+    json_files = ["user_links.json", "default_users.json", "tracked_streaks.json"]
+    should_migrate_json = False
+    
+    if (BOT_DIR / "user_links.json").exists() and not get_all_user_links():
+        should_migrate_json = True
+    elif (BOT_DIR / "default_users.json").exists() and not get_all_default_users():
+        should_migrate_json = True
+    elif (BOT_DIR / "tracked_streaks.json").exists() and not get_all_tracked_streaks():
+        should_migrate_json = True
+        
+    if should_migrate_json:
+        print("[MIGRATION] Legacy JSON files found and tables empty. Running conversion...")
+        try:
+            subprocess.run([sys.executable, "convert_to_db.py", "--force"], cwd=str(BOT_DIR), check=True)
+            print("[MIGRATION] JSON conversion finished.")
+        except Exception as e:
+            print(f"[ERROR] JSON migration failed: {e}")
+
+    # Check if we need to migrate tracked_users.txt (if not done by convert_to_db)
+    tracked_users = get_tracked_users()
+    if not tracked_users:
+        tracked_file = BOT_DIR / "tracked_users.txt"
+        if tracked_file.exists():
+            print("[MIGRATION] tracked_users table empty but tracked_users.txt found. Migrating...")
+            try:
+                # We can re-run convert_to_db.py as it handles tracked_users now, or do it manually.
+                # Running convert_to_db.py is safer as it centralizes logic.
+                subprocess.run([sys.executable, "convert_to_db.py", "--force"], cwd=str(BOT_DIR), check=True)
+            except Exception as e:
+                print(f"[ERROR] Tracked users migration failed: {e}")
+
 def get_player_status(ign):
     """Fetch player online status from Hypixel API."""
     api_key = get_api_key()
@@ -2185,30 +2275,12 @@ def get_player_status(ign):
         return "Unknown", (170, 170, 170) # Gray
     
     # Get UUID
-    uuid = None
-    try:
-        r = requests.get(f"https://api.mojang.com/users/profiles/minecraft/{ign}", timeout=2)
-        if r.status_code == 200:
-            uuid = r.json().get('id')
-    except:
-        pass
-        
-    if not uuid:
-        # Fallback to PlayerDB if Mojang fails
-        try:
-            r = requests.get(f"https://playerdb.co/api/player/minecraft/{ign}", timeout=2)
-            if r.status_code == 200:
-                data = r.json()
-                if data.get('success'):
-                    uuid = data.get('data', {}).get('player', {}).get('raw_id')
-        except:
-            pass
-
+    uuid = get_uuid(ign)
     if not uuid:
         return "Unknown", (170, 170, 170)
 
     try:
-        headers = {"API-Key": api_key}
+        headers = {"API-Key": api_key, "User-Agent": "SheepWarsBot/1.0"}
         r = requests.get("https://api.hypixel.net/status", params={"uuid": uuid}, headers=headers, timeout=3)
         if r.status_code == 200:
             data = r.json()
@@ -2686,7 +2758,9 @@ async def scheduler_loop():
 
 # Helper class for stats tab view
 class StatsTabView(discord.ui.View):
-    def __init__(self, data_dict, ign, level_value: int, prestige_icon: str, status_text="Online", status_color=(85, 255, 85), skin_image=None):
+    def __init__(self, data_dict, ign, level_value: int, prestige_icon: str, 
+                 ign_color: str = None, guild_tag: str = None, guild_hex: str = None,
+                 status_text="Online", status_color=(85, 255, 85), skin_image=None):
         super().__init__()
         self.data = data_dict 
         self.ign = ign
@@ -2696,10 +2770,14 @@ class StatsTabView(discord.ui.View):
         self.status_color = status_color
         self.skin_image = skin_image
         self.current_tab = "all-time"
-        self.ign_color = None
-        self.guild_tag = None
-        self.guild_hex = None
-        self._load_color()
+        
+        self.ign_color = ign_color
+        self.guild_tag = guild_tag
+        self.guild_hex = guild_hex
+        
+        if self.ign_color is None or self.guild_tag is None:
+            self._load_color()
+            
         self.update_button_styles()
 
     def _load_color(self):
@@ -3383,11 +3461,11 @@ def _load_leaderboard_data_from_excel(metric: str):
                 print(f"[LEADERBOARD] Error processing {username}: {e}")
                 continue
             
-            # Sort each period by value descending
-            for p in result:
-                result[p].sort(key=lambda x: x[1], reverse=True)
-            
-            return result
+        # Sort each period by value descending
+        for p in result:
+            result[p].sort(key=lambda x: x[1], reverse=True)
+        
+        return result
     except Exception as e:
         print(f"[LEADERBOARD] Error loading from Excel: {e}")
         return result
@@ -3546,11 +3624,11 @@ def _load_ratio_leaderboard_data_from_excel(metric: str):
                 print(f"[LEADERBOARD] Error processing {username}: {e}")
                 continue
             
-            # Sort each period by value descending
-            for p in result:
-                result[p].sort(key=lambda x: x[1], reverse=True)
-            
-            return result
+        # Sort each period by value descending
+        for p in result:
+            result[p].sort(key=lambda x: x[1], reverse=True)
+        
+        return result
     except Exception as e:
         print(f"[LEADERBOARD] Error loading ratio data from Excel: {e}")
         return result
@@ -3986,6 +4064,16 @@ async def on_ready():
     import time
     bot_instance_id = int(time.time() * 1000) % 100000
     print(f"[OK] Bot logged in as {bot.user} - Instance ID: {bot_instance_id}")
+    
+    # Initialize database schema to ensure all tables exist
+    await asyncio.to_thread(init_database)
+    
+    # Check for legacy data migration
+    await check_legacy_migration()
+    
+    # Verify API key
+    await asyncio.to_thread(verify_api_key)
+    
     try:
         synced = await bot.tree.sync()
         print(f"[OK] Synced {len(synced)} command(s) - Instance ID: {bot_instance_id}")
@@ -4028,39 +4116,23 @@ async def track(interaction: discord.Interaction, ign: str):
         if result.returncode == 0:
             print(f"[OK] api_get.py succeeded for {ign}")
             
-            # Verify the sheet was actually created and get the properly-cased username
-            excel_file = BOT_DIR / "stats.xlsx"
-            if not excel_file.exists():
-                await interaction.followup.send(f"[ERROR] Excel file was not created for {ign}.")
-                return
+            # Parse output to get proper username
+            actual_ign = ign
+            if result.stdout:
+                try:
+                    for line in reversed(result.stdout.splitlines()):
+                        if line.strip().startswith('{'):
+                            data = json.loads(line.strip())
+                            if 'username' in data:
+                                actual_ign = data['username']
+                                break
+                except:
+                    pass
             
-            # Load and check if the sheet exists, and get the actual sheet name (proper case)
-            actual_ign = ign  # Default to input if not found
-            wb = None
-            try:
-                # FAILSAFE: Load workbook with guaranteed cleanup
-                wb = load_workbook(str(excel_file), read_only=True, data_only=True)
-                sheet_exists = False
-                key = ign.casefold()
-                for sheet_name in wb.sheetnames:
-                    if sheet_name.casefold() == key:
-                        sheet_exists = True
-                        actual_ign = sheet_name  # Get the properly cased username from the sheet name
-                        break
-                
-                if not sheet_exists:
-                    await interaction.followup.send(f"[ERROR] Sheet for {ign} was not created.")
-                    return
-            except Exception as e:
-                await interaction.followup.send(f"[ERROR] Could not verify sheet creation: {str(e)}")
+            # Verify user exists in DB
+            if not user_exists(actual_ign):
+                await interaction.followup.send(f"[ERROR] Database entry for {ign} was not created.")
                 return
-            finally:
-                # FAILSAFE: Always close workbook even if an error occurs
-                if wb is not None:
-                    try:
-                        wb.close()
-                    except Exception as close_err:
-                        print(f"[WARNING] Error closing workbook: {close_err}")
             
             # Add to tracked users list using the properly-cased username
             added = add_tracked_user(actual_ign)
@@ -4342,28 +4414,7 @@ async def untrack(interaction: discord.Interaction, ign: str):
         return
     
     try:
-        # Find the properly-cased username from Excel file
-        excel_file = BOT_DIR / "stats.xlsx"
         actual_ign = ign
-        if excel_file.exists():
-            wb = None
-            try:
-                # FAILSAFE: Load workbook with guaranteed cleanup
-                wb = load_workbook(str(excel_file), read_only=True, data_only=True)
-                key = ign.casefold()
-                for sheet_name in wb.sheetnames:
-                    if sheet_name.casefold() == key:
-                        actual_ign = sheet_name
-                        break
-            except Exception:
-                pass
-            finally:
-                # FAILSAFE: Always close workbook even if an error occurs
-                if wb is not None:
-                    try:
-                        wb.close()
-                    except Exception as close_err:
-                        print(f"[WARNING] Error closing workbook: {close_err}")
         
         # Remove from all locations
         removed_tracked = remove_tracked_user(actual_ign)
@@ -4859,6 +4910,31 @@ async def refresh(interaction: discord.Interaction, mode: discord.app_commands.C
         except (discord.errors.NotFound, discord.errors.HTTPException):
             print(f"[REFRESH] Exception but interaction expired")
 
+@bot.tree.command(name="fixguilds", description="Admin: Force refresh all guild tags and colors")
+async def fixguilds(interaction: discord.Interaction):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ This command is only available to bot administrators.", ephemeral=True)
+        return
+
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True)
+
+    await interaction.followup.send("Starting guild data repair... This may take a while.", ephemeral=True)
+    
+    try:
+        # Run the fix script
+        result = await asyncio.to_thread(run_script, "fix_guilds.py", [])
+        
+        if result.returncode == 0:
+            # Force cache refresh so the bot sees the new tags immediately
+            await STATS_CACHE.refresh()
+            await interaction.followup.send("✅ Guild data repair completed successfully!", ephemeral=True)
+        else:
+            err = result.stderr or result.stdout or "Unknown error"
+            await interaction.followup.send(f"❌ Guild repair failed:\n```{sanitize_output(err[:1000])}```", ephemeral=True)
+            
+    except Exception as e:
+        await interaction.followup.send(f"❌ Exception during guild repair: {str(e)}", ephemeral=True)
 
 @bot.tree.command(name="stats", description="Get full player stats (Template.xlsx layout) with deltas")
 @discord.app_commands.describe(ign="Minecraft IGN (optional if you set /default)")
@@ -5085,6 +5161,7 @@ async def killdistribution(interaction: discord.Interaction, ign: str = None):
         except (discord.errors.NotFound, discord.errors.HTTPException):
             return
 
+    user_data = None
     try:
         result = run_script("api_get.py", ["-ign", ign])
         if result.returncode != 0 and not (result.stderr and "429" in result.stderr):
@@ -5097,7 +5174,7 @@ async def killdistribution(interaction: discord.Interaction, ign: str = None):
             if result.stdout:
                 data = json.loads(result.stdout)
                 if "processed_stats" in data and "username" in data:
-                    await STATS_CACHE.update_cache_entry(data["username"], data["processed_stats"])
+                    user_data = await STATS_CACHE.update_cache_entry(data["username"], data["processed_stats"])
                     ign = data["username"]
         except Exception as e:
             print(f"[WARNING] Failed to update cache from output: {e}")
@@ -5107,15 +5184,17 @@ async def killdistribution(interaction: discord.Interaction, ign: str = None):
             await interaction.followup.send("[ERROR] Excel file not found")
             return
 
-        cache_data = await STATS_CACHE.get_data()
-        key = ign.casefold()
-        user_data = None
-        actual_ign = ign
-        for name, data in cache_data.items():
-            if name.casefold() == key:
-                user_data = data
-                actual_ign = name
-                break
+        if not user_data:
+            cache_data = await STATS_CACHE.get_data()
+            key = ign.casefold()
+            actual_ign = ign
+            for name, data in cache_data.items():
+                if name.casefold() == key:
+                    user_data = data
+                    actual_ign = name
+                    break
+        else:
+            actual_ign = ign
         
         if not user_data:
             await interaction.followup.send(f"[ERROR] Player sheet '{ign}' not found")
@@ -5157,6 +5236,7 @@ async def deathdistribution(interaction: discord.Interaction, ign: str = None):
         except (discord.errors.NotFound, discord.errors.HTTPException):
             return
 
+    user_data = None
     try:
         result = run_script("api_get.py", ["-ign", ign])
         if result.returncode != 0 and not (result.stderr and "429" in result.stderr):
@@ -5169,7 +5249,7 @@ async def deathdistribution(interaction: discord.Interaction, ign: str = None):
             if result.stdout:
                 data = json.loads(result.stdout)
                 if "processed_stats" in data and "username" in data:
-                    await STATS_CACHE.update_cache_entry(data["username"], data["processed_stats"])
+                    user_data = await STATS_CACHE.update_cache_entry(data["username"], data["processed_stats"])
                     ign = data["username"]
         except Exception as e:
             print(f"[WARNING] Failed to update cache from output: {e}")
@@ -5179,15 +5259,17 @@ async def deathdistribution(interaction: discord.Interaction, ign: str = None):
             await interaction.followup.send("[ERROR] Excel file not found")
             return
 
-        cache_data = await STATS_CACHE.get_data()
-        key = ign.casefold()
-        user_data = None
-        actual_ign = ign
-        for name, data in cache_data.items():
-            if name.casefold() == key:
-                user_data = data
-                actual_ign = name
-                break
+        if not user_data:
+            cache_data = await STATS_CACHE.get_data()
+            key = ign.casefold()
+            actual_ign = ign
+            for name, data in cache_data.items():
+                if name.casefold() == key:
+                    user_data = data
+                    actual_ign = name
+                    break
+        else:
+            actual_ign = ign
         
         if not user_data:
             await interaction.followup.send(f"[ERROR] Player sheet '{ign}' not found")
@@ -5263,13 +5345,13 @@ async def sheepwars(interaction: discord.Interaction, ign: str = None):
                             continue
                 
                 if json_data and "processed_stats" in json_data and "username" in json_data:
-                    await STATS_CACHE.update_cache_entry(json_data["username"], json_data["processed_stats"])
+                    user_data = await STATS_CACHE.update_cache_entry(json_data["username"], json_data["processed_stats"])
                     ign = json_data["username"]
-                    # Re-fetch from cache
-                    cache_data = await STATS_CACHE.get_data()
-                    user_data = cache_data.get(ign)
             except Exception as e:
                 print(f"[WARNING] Failed to parse api_get output in sheepwars: {e}")
+        elif result.returncode != 0:
+            # If api_get failed, log it and potentially inform user
+            print(f"[ERROR] api_get failed for {ign} in sheepwars: {result.stderr}")
 
     if not user_data:
         await interaction.followup.send("Player not found in database or API error.")
@@ -5304,6 +5386,9 @@ async def sheepwars(interaction: discord.Interaction, ign: str = None):
     meta = user_data.get("meta", {})
     level = meta.get("level", 0)
     icon = meta.get("icon", "")
+    ign_color = meta.get("ign_color")
+    guild_tag = meta.get("guild_tag")
+    guild_hex = meta.get("guild_hex")
     
     # Get real-time status
     # Parallelize status and skin fetching to reduce load time
@@ -5311,7 +5396,9 @@ async def sheepwars(interaction: discord.Interaction, ign: str = None):
     skin_task = asyncio.to_thread(get_player_body, ign)
     (status_text, status_color), skin_image = await asyncio.gather(status_task, skin_task)
     
-    view = StatsTabView(all_data, ign, int(level), icon, status_text=status_text, status_color=status_color, skin_image=skin_image)
+    view = StatsTabView(all_data, ign, int(level), icon, 
+                        ign_color=ign_color, guild_tag=guild_tag, guild_hex=guild_hex,
+                        status_text=status_text, status_color=status_color, skin_image=skin_image)
     
     # Check if tracked to determine response
     is_tracked = any(u.casefold() == ign.casefold() for u in tracked_users)

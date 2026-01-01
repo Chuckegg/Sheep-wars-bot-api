@@ -81,10 +81,27 @@ def get_uuid(username: str) -> tuple[str, str]:
     Returns:
         tuple[str, str]: (uuid, properly_cased_username)
     """
-    r = requests.get(f"https://api.mojang.com/users/profiles/minecraft/{username}", timeout=15)
-    r.raise_for_status()
-    data = r.json()
-    return data["id"], data.get("name", username)
+    # Try Mojang
+    try:
+        r = requests.get(f"https://api.mojang.com/users/profiles/minecraft/{username}", timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            return data["id"], data.get("name", username)
+    except Exception:
+        pass
+        
+    # Try PlayerDB fallback
+    try:
+        r = requests.get(f"https://playerdb.co/api/player/minecraft/{username}", timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get('success'):
+                meta = data.get('data', {}).get('player', {})
+                return meta.get('raw_id'), meta.get('username', username)
+    except Exception:
+        pass
+
+    raise requests.exceptions.RequestException(f"Could not resolve UUID for {username}")
 
 
 def get_hypixel_player(uuid: str, api_key: str) -> Dict:
@@ -113,17 +130,17 @@ def get_hypixel_guild(uuid: str, api_key: str) -> Dict:
 def extract_guild_info(guild_json: Dict) -> tuple[Optional[str], Optional[str]]:
     """Extract guild tag and tag color from Hypixel guild API response.
     
-    Returns (tag, tagColor) or (None, None) if not in a guild.
+    Returns (tag, tagColor). Returns ("", "") if not in a guild.
     """
     if not isinstance(guild_json, dict):
         return None, None
     
     guild = guild_json.get("guild")
     if not guild or not isinstance(guild, dict):
-        return None, None
+        return "", ""
     
-    tag = guild.get("tag")
-    tag_color = guild.get("tagColor")
+    tag = guild.get("tag") or ""
+    tag_color = guild.get("tagColor") or ""
     
     return tag, tag_color
 
@@ -239,7 +256,7 @@ def save_user_color_and_rank(username: str, rank: Optional[str], guild_tag: Opti
     """
     from db_helper import get_user_meta, update_user_meta
     
-    username_key = username.lower()
+    username_key = username
     
     # Check if user already exists in database
     existing_meta = get_user_meta(username_key)
@@ -388,7 +405,7 @@ def api_update_database(username: str, api_key: str, snapshot_sections: set[str]
     # Update metadata
     level = int(current.get('level', 0))
     # Calculate prestige icon (placeholder - you can add icon logic here)
-    icon = ""
+    icon = None
     update_user_meta(proper_username, level, icon, None, guild_tag, guild_color)
     
     # Get processed stats with deltas for return value

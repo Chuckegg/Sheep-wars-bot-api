@@ -8,46 +8,14 @@ import sqlite3
 import openpyxl
 from pathlib import Path
 import sys
+import argparse
+import json
+
+# Import schema initialization from db_helper
+from db_helper import init_database
 
 EXCEL_FILE = Path(__file__).parent / "stats.xlsx"
 DB_FILE = Path(__file__).parent / "stats.db"
-
-def create_database_schema(conn):
-    """Create the database schema for stats storage."""
-    cursor = conn.cursor()
-    
-    # User stats table - stores all stat values for each user
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_stats (
-            username TEXT NOT NULL,
-            stat_name TEXT NOT NULL,
-            lifetime REAL DEFAULT 0,
-            session REAL DEFAULT 0,
-            daily REAL DEFAULT 0,
-            yesterday REAL DEFAULT 0,
-            monthly REAL DEFAULT 0,
-            PRIMARY KEY (username, stat_name)
-        )
-    ''')
-    
-    # User metadata table - stores level, icon, colors, etc.
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_meta (
-            username TEXT PRIMARY KEY,
-            level INTEGER DEFAULT 0,
-            icon TEXT DEFAULT '',
-            ign_color TEXT DEFAULT NULL,
-            guild_tag TEXT DEFAULT NULL,
-            guild_hex TEXT DEFAULT NULL
-        )
-    ''')
-    
-    # Create indexes for faster lookups
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_username ON user_stats(username)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_stat_name ON user_stats(stat_name)')
-    
-    conn.commit()
-    print("[DB] Database schema created successfully")
 
 def extract_excel_data(excel_path):
     """Extract all data from stats.xlsx."""
@@ -197,6 +165,102 @@ def insert_data_to_db(conn, all_users_data):
     conn.commit()
     print(f"[DB] Inserted {users_inserted} users and {stats_inserted} stat records")
 
+def migrate_tracked_users(conn):
+    """Migrate tracked users from text file to database."""
+    tracked_file = Path(__file__).parent / "tracked_users.txt"
+    if tracked_file.exists():
+        print(f"[MIGRATE] Found {tracked_file}, migrating to database...")
+        try:
+            with open(tracked_file, 'r', encoding='utf-8') as f:
+                users = [line.strip() for line in f if line.strip()]
+            
+            cursor = conn.cursor()
+            count = 0
+            for user in users:
+                cursor.execute('INSERT OR IGNORE INTO tracked_users (username) VALUES (?)', (user,))
+                if cursor.rowcount > 0:
+                    count += 1
+            conn.commit()
+            print(f"[MIGRATE] Migrated {count} tracked users.")
+        except Exception as e:
+            print(f"[ERROR] Failed to migrate tracked users: {e}")
+
+def migrate_json_data(conn):
+    """Migrate data from legacy JSON files (user_links, default_users, tracked_streaks)."""
+    base_dir = Path(__file__).parent
+    
+    # Migrate user_links.json
+    links_file = base_dir / "user_links.json"
+    if links_file.exists():
+        print(f"[MIGRATE] Found {links_file}, migrating...")
+        try:
+            with open(links_file, 'r', encoding='utf-8') as f:
+                links = json.load(f)
+            
+            cursor = conn.cursor()
+            count = 0
+            for username, discord_id in links.items():
+                cursor.execute('''
+                    INSERT OR REPLACE INTO user_links (username, discord_id)
+                    VALUES (?, ?)
+                ''', (username, str(discord_id)))
+                count += 1
+            conn.commit()
+            print(f"[MIGRATE] Migrated {count} user links.")
+        except Exception as e:
+            print(f"[ERROR] Failed to migrate user links: {e}")
+
+    # Migrate default_users.json
+    defaults_file = base_dir / "default_users.json"
+    if defaults_file.exists():
+        print(f"[MIGRATE] Found {defaults_file}, migrating...")
+        try:
+            with open(defaults_file, 'r', encoding='utf-8') as f:
+                defaults = json.load(f)
+            
+            cursor = conn.cursor()
+            count = 0
+            for discord_id, username in defaults.items():
+                cursor.execute('''
+                    INSERT OR REPLACE INTO default_users (discord_id, username)
+                    VALUES (?, ?)
+                ''', (str(discord_id), username))
+                count += 1
+            conn.commit()
+            print(f"[MIGRATE] Migrated {count} default users.")
+        except Exception as e:
+            print(f"[ERROR] Failed to migrate default users: {e}")
+
+    # Migrate tracked_streaks.json
+    streaks_file = base_dir / "tracked_streaks.json"
+    if streaks_file.exists():
+        print(f"[MIGRATE] Found {streaks_file}, migrating...")
+        try:
+            with open(streaks_file, 'r', encoding='utf-8') as f:
+                streaks = json.load(f)
+            
+            cursor = conn.cursor()
+            count = 0
+            for username, data in streaks.items():
+                cursor.execute('''
+                    INSERT OR REPLACE INTO tracked_streaks 
+                    (username, winstreak, killstreak, last_wins, last_losses, last_kills, last_deaths)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    username,
+                    data.get('winstreak', 0),
+                    data.get('killstreak', 0),
+                    data.get('last_wins', 0),
+                    data.get('last_losses', 0),
+                    data.get('last_kills', 0),
+                    data.get('last_deaths', 0)
+                ))
+                count += 1
+            conn.commit()
+            print(f"[MIGRATE] Migrated {count} streak records.")
+        except Exception as e:
+            print(f"[ERROR] Failed to migrate streaks: {e}")
+
 def verify_conversion(conn, all_users_data):
     """Verify that all data was converted correctly."""
     cursor = conn.cursor()
@@ -243,27 +307,38 @@ def main():
     print("Excel to SQLite Conversion Tool")
     print("=" * 60)
     
+    parser = argparse.ArgumentParser(description="Convert Excel stats to SQLite database")
+    parser.add_argument("--force", action="store_true", help="Overwrite existing database without prompt")
+    args = parser.parse_args()
+    
     # Check if database already exists
     if DB_FILE.exists():
-        response = input(f"\n[WARN] {DB_FILE} already exists. Overwrite? (yes/no): ")
-        if response.lower() != 'yes':
-            print("[ABORT] Conversion cancelled.")
-            sys.exit(0)
-        DB_FILE.unlink()
-        print(f"[DB] Deleted existing {DB_FILE}")
+        if not args.force:
+            response = input(f"\n[WARN] {DB_FILE} already exists. Update/Merge? (yes/no): ")
+            if response.lower() != 'yes':
+                print("[ABORT] Conversion cancelled.")
+                sys.exit(0)
+        print(f"[DB] Using existing {DB_FILE}")
     
     # Create database and schema
+    print("[DB] Initializing database schema...")
+    init_database(DB_FILE)
+    
     conn = sqlite3.connect(DB_FILE)
-    create_database_schema(conn)
     
     # Extract data from Excel
-    all_users_data = extract_excel_data(EXCEL_FILE)
+    if EXCEL_FILE.exists():
+        all_users_data = extract_excel_data(EXCEL_FILE)
+        insert_data_to_db(conn, all_users_data)
+        verify_conversion(conn, all_users_data)
+    else:
+        print(f"[WARN] {EXCEL_FILE} not found, skipping Excel import.")
     
-    # Insert data into database
-    insert_data_to_db(conn, all_users_data)
+    # Migrate tracked users
+    migrate_tracked_users(conn)
     
-    # Verify conversion
-    verify_conversion(conn, all_users_data)
+    # Migrate JSON data
+    migrate_json_data(conn)
     
     # Close connection
     conn.close()
