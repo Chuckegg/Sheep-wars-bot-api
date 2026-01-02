@@ -265,21 +265,15 @@ def save_user_color_and_rank(username: str, rank: Optional[str], guild_tag: Opti
         # User exists - only update rank and guild info, preserve their color
         print(f"[DEBUG] User {username} already exists with data: {existing_meta}")
         
-        old_color = existing_meta.get('ign_color')
-        print(f"[DEBUG] Preserving existing color {old_color}, updating rank to {rank}, guild: {guild_tag}")
-        
-        # Update only rank and guild, keep color
-        update_user_meta(username_key, 
-                        ign_color=old_color,
-                        guild_tag=guild_tag, 
+        update_user_meta(username_key,
+                        rank=rank,
+                        guild_tag=guild_tag,
                         guild_hex=guild_color)
     else:
-        # NEW USER - assign color based on rank automatically
-        auto_color = get_rank_color(rank)
-        print(f"[DEBUG] NEW USER {username} - assigning auto color {auto_color} for rank {rank}, guild: {guild_tag}")
-        
+        # NEW USER - do not set ign_color, let it default to NULL so rank color is used dynamically
+        print(f"[DEBUG] NEW USER {username} - saving rank {rank}, guild: {guild_tag}")
         update_user_meta(username_key,
-                        ign_color=auto_color,
+                        rank=rank,
                         guild_tag=guild_tag,
                         guild_hex=guild_color)
 

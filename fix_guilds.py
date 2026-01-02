@@ -17,7 +17,7 @@ def fix_guilds():
     success_count = 0
     for i, username in enumerate(usernames):
         try:
-            print(f"[GUILD FIX] [{i1}/{len(usernames)}] Processing {username}...")
+            print(f"[GUILD FIX] [{i+1}/{len(usernames)}] Processing {username}...")
             
             # Get UUID
             try:
@@ -31,10 +31,14 @@ def fix_guilds():
                 guild_data = get_hypixel_guild(uuid, api_key)
                 tag, color = extract_guild_info(guild_data)
                 
+                # Sanitize tag to remove unicode characters
+                if tag:
+                    tag = "".join(c for c in tag if ord(c) < 128)
+                
                 # Update DB - this will overwrite any numbers with the correct string or NULL
                 update_user_meta(username, guild_tag=tag, guild_hex=color)
                 print(f"  [OK] Updated {username}: Guild=[{tag}], Color={color}")
-                success_count = 1
+                success_count += 1
                 
             except Exception as e:
                 print(f"  [WARN] Failed to get guild for {username}: {e}")

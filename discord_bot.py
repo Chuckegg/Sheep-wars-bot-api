@@ -13,6 +13,7 @@ from db_helper import (
     get_database_stats,
     get_user_stats_with_deltas,
     get_user_meta,
+    get_all_user_meta,
     update_user_meta,
     user_exists,
     get_discord_id,
@@ -232,7 +233,10 @@ class StatsCache:
                         level = int(stats['experience']['lifetime'] / 5000)
                     
                     # Get user color info from database
-                    ign_color = meta_db.get('ign_color', '#FFFFFF') if meta_db else '#FFFFFF'
+                    ign_color = meta_db.get('ign_color') if meta_db else None
+                    if not ign_color:
+                        ign_color = get_rank_color_hex(meta_db.get('rank') if meta_db else None)
+                    
                     g_tag = meta_db.get('guild_tag') if meta_db else None
                     g_hex = meta_db.get('guild_hex', '#AAAAAA') if meta_db else '#AAAAAA'
                     
@@ -272,7 +276,10 @@ class StatsCache:
             if level == 0 and 'experience' in processed_stats:
                 level = int(processed_stats['experience']['lifetime'] / 5000)
             
-            ign_color = meta_db.get('ign_color', '#FFFFFF') if meta_db else '#FFFFFF'
+            ign_color = meta_db.get('ign_color') if meta_db else None
+            if not ign_color:
+                ign_color = get_rank_color_hex(meta_db.get('rank') if meta_db else None)
+            
             g_tag = meta_db.get('guild_tag') if meta_db else None
             g_hex = meta_db.get('guild_hex', '#AAAAAA') if meta_db else '#AAAAAA'
 
@@ -755,6 +762,23 @@ _MINECRAFT_256_INDEX = {
     'f': 15,   # white
 }
 
+def get_rank_color_hex(rank: Optional[str]) -> str:
+    """Get the default hex color for a rank."""
+    if not rank:
+        return "#FFFFFF"  # White for no rank/default
+    
+    rank_upper = rank.upper()
+    rank_colors = {
+        "ADMIN": "#FF5555",           # Red
+        "SUPERSTAR": "#FFAA00",       # Gold (MVP++)
+        "MVP_PLUS": "#55FFFF",        # Aqua
+        "MVP_PLUS_PLUS": "#FFAA00",   # Gold
+        "MVP": "#55FFFF",             # Aqua
+        "VIP_PLUS": "#00AA00",        # Dark Green
+        "VIP": "#55FF55",             # Green
+    }
+    return rank_colors.get(rank_upper, "#AAAAAA") # Default to Gray for unlisted ranks
+
 MINECRAFT_CODE_TO_ANSI_SGR = {k: f"\u001b[38;5;{idx}m" for k, idx in _MINECRAFT_256_INDEX.items()}
 
 # Keep the 24-bit hex map for embed accent colors
@@ -1105,12 +1129,24 @@ def render_stat_box(label: str, value: str, width: int = 200, height: int = 80):
     # Determine color based on label content for consistency with sheepwars command
     color = (255, 255, 255)
     l = label.lower()
-    if "win" in l or "wlr" in l or "kdr" in l:
+    if "kdr" in l or "wlr" in l or "win" in l:
         color = (85, 255, 85)
-    elif "loss" in l:
+    elif "loss" in l or "death" in l:
         color = (255, 85, 85)
     elif "playtime" in l:
         color = (255, 85, 255)
+    elif "damage" in l:
+        color = (255, 170, 0)
+    elif "exp" in l:
+        color = (85, 255, 255)
+    elif "coin" in l:
+        color = (255, 215, 0)
+    elif "bow" in l:
+        color = (255, 255, 85)
+    elif "void" in l:
+        color = (170, 0, 170)
+    elif "sheep" in l or "wool" in l:
+        color = (200, 200, 200)
         
     return render_modern_card(label, value, width, height, color=color)
 
@@ -1171,7 +1207,8 @@ def create_stats_composite_image(level, icon, ign, tab_name, wins, losses, wl_ra
             g_rgb = tuple(int(str(guild_hex).lstrip('#')[j:j+2], 16) for j in (0, 2, 4))
         except:
             g_rgb = (170, 170, 170)
-    c5 = render_modern_card("Guild", f"{str(guild_tag) if guild_tag else 'None'}", header_card_w, 85, color=g_rgb)
+    safe_tag = _safe_guild_tag(guild_tag)
+    c5 = render_modern_card("Guild", f"{safe_tag if safe_tag else 'None'}", header_card_w, 85, color=g_rgb)
     c6 = render_modern_card("Status", status_text, header_card_w, 85, color=status_color)
 
     for i, card in enumerate([c1, c2, c3]):
@@ -1257,7 +1294,7 @@ def create_full_stats_image(ign: str, tab_name: str, level: int, icon: str, stat
         ],
         [
             ("Damage dealt", stats.get("damage", "0")),
-            ("Damage/Game", stats.get("damage_per_game", "0")),
+            ("Damage/Kill", stats.get("damage_per_kill", "0")),
             ("Void kills", stats.get("void_kills", "0")),
             ("Void deaths", stats.get("void_deaths", "0")),
             ("Void KDR", stats.get("void_kdr", "0")),
@@ -1279,9 +1316,9 @@ def create_full_stats_image(ign: str, tab_name: str, level: int, icon: str, stat
         [
             ("Games Played", stats.get("games_played", "0")),
             ("Damage/Sheep", stats.get("damage_per_sheep", "0")),
-            ("Meelee kills", stats.get("melee_kills", "0")),
-            ("Meelee Deaths", stats.get("melee_deaths", "0")),
-            ("Meelee KDR", stats.get("melee_kdr", "0")),
+            ("Melee kills", stats.get("melee_kills", "0")),
+            ("Melee deaths", stats.get("melee_deaths", "0")),
+            ("Melee KDR", stats.get("melee_kdr", "0")),
         ],
     ]
 
@@ -1490,14 +1527,15 @@ def create_leaderboard_image(tab_name: str, metric_label: str, leaderboard_data:
         draw.text((n_x, y + 15), player, font=font_name, fill=p_rgb)
         
         # Guild
-        if g_tag:
+        safe_tag = _safe_guild_tag(g_tag)
+        if safe_tag:
             n_w = draw.textbbox((0,0), player, font=font_name)[2] - draw.textbbox((0,0), player, font=font_name)[0]
             g_x = n_x + n_w + 10
             try:
                 g_rgb = tuple(int(str(g_hex).lstrip('#')[j:j+2], 16) for j in (0, 2, 4))
             except:
                 g_rgb = (170, 170, 170)
-            draw.text((g_x, y + 15), f"[{str(g_tag)}]", font=font_name, fill=g_rgb)
+            draw.text((g_x, y + 15), f"[{safe_tag}]", font=font_name, fill=g_rgb)
         
         # Value
         if is_playtime:
@@ -1960,19 +1998,25 @@ def load_user_colors() -> dict:
     """Load user colors and metadata from database"""
     try:
         result = {}
-        usernames = get_all_usernames()
-        for username in usernames:
-            meta = get_user_meta(username)
-            if meta:
-                # Convert database format to expected format
-                result[username.lower()] = {
-                    'color': meta.get('ign_color'),
-                    'guild_tag': meta.get('guild_tag'),
-                    'guild_color': meta.get('guild_hex')
-                }
+        # Use optimized bulk fetch
+        all_meta = get_all_user_meta()
+        
+        for username, meta in all_meta.items():
+            # Convert database format to expected format
+            result[username.lower()] = {
+                'color': meta.get('ign_color'),
+                'guild_tag': meta.get('guild_tag'),
+                'guild_color': meta.get('guild_hex'),
+                'icon': meta.get('icon'),
+                'rank': meta.get('rank'),
+            }
+        print(f"[DEBUG] Loaded colors/meta for {len(result)} users")
+        if result:
+            sample_user = next(iter(result))
+            print(f"[DEBUG] Sample meta for {sample_user}: {result[sample_user]}")
         return result
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[ERROR] Failed to load user colors: {e}")
     return {}
 
 
@@ -2205,7 +2249,7 @@ def verify_api_key():
 
     print("[STARTUP] Verifying Hypixel API key...")
     try:
-        r = requests.get("https://api.hypixel.net/v2/key", headers={"API-Key": key}, timeout=10)
+        r = requests.get("https://api.hypixel.net/key", headers={"API-Key": key}, timeout=10)
         if r.status_code == 200:
             data = r.json()
             if data.get('success'):
@@ -2447,13 +2491,21 @@ async def staggered_stats_refresher(interval_minutes: int = 10):
     while True:
         try:
             users = load_tracked_users()
-            if not users:
+            
+            # Identify users who are being tracked for streaks (they get their own fast refresh loop)
+            streak_data = load_tracked_streaks()
+            streak_users = {u.lower() for u in streak_data.keys()}
+            
+            # Only process users NOT in the streak list
+            users_to_refresh = [u for u in users if u.lower() not in streak_users]
+            
+            if not users_to_refresh:
                 await asyncio.sleep(interval)
                 continue
 
             # assign a random delay in [0, interval-buffer) to each user, then schedule
             tasks = []
-            for u in users:
+            for u in users_to_refresh:
                 d = random.uniform(0, max(0, interval - buffer))
                 tasks.append(asyncio.create_task(_delayed_refresh_user(u, d)))
 
@@ -2471,6 +2523,38 @@ async def staggered_stats_refresher(interval_minutes: int = 10):
         except Exception as e:
             print(f"[REFRESH] Staggered refresher error: {e}")
             await asyncio.sleep(interval)
+
+
+async def streak_stats_refresher(interval_seconds: int = 60):
+    """Background task that refreshes streak-tracked users every minute."""
+    while True:
+        try:
+            # Get users with active streak tracking
+            streak_data = load_tracked_streaks()
+            streak_users = list(streak_data.keys())
+            
+            if not streak_users:
+                await asyncio.sleep(interval_seconds)
+                continue
+            
+            # Spread updates over the interval to avoid spikes
+            tasks = []
+            for u in streak_users:
+                # Random delay within the interval (leaving 5s buffer)
+                d = random.uniform(0, max(0, interval_seconds - 5))
+                tasks.append(asyncio.create_task(_delayed_refresh_user(u, d)))
+            
+            await asyncio.sleep(interval_seconds)
+            
+            # Cleanup tasks
+            for t in tasks:
+                if t.done():
+                    try: t.result() 
+                    except: pass
+                    
+        except Exception as e:
+            print(f"[REFRESH] Streak refresher error: {e}")
+            await asyncio.sleep(interval_seconds)
 
 
 # Track last known player count for Sheep Wars to calculate delta
@@ -2785,6 +2869,8 @@ class StatsTabView(discord.ui.View):
             meta = get_user_meta(self.ign)
             if meta:
                 self.ign_color = meta.get('ign_color')
+                if not self.ign_color:
+                    self.ign_color = get_rank_color_hex(meta.get('rank'))
                 self.guild_tag = meta.get('guild_tag')
                 self.guild_hex = meta.get('guild_hex') or "#AAAAAA"
         except: pass
@@ -2861,6 +2947,8 @@ class StatsFullView(discord.ui.View):
             meta = get_user_meta(self.ign)
             if meta:
                 self.ign_color = meta.get('ign_color')
+                if not self.ign_color:
+                    self.ign_color = get_rank_color_hex(meta.get('rank'))
                 self.guild_tag = meta.get('guild_tag')
                 self.guild_color = meta.get('guild_hex')
                 print(f"[DEBUG] Loaded color for {self.ign}: {self.ign_color}, guild: [{self.guild_tag}] ({self.guild_color})")
@@ -2915,6 +3003,7 @@ class StatsFullView(discord.ui.View):
         kills_per_win = safe_div(kills, wins)
         damage_per_game = safe_div(damage, games)
         damage_per_sheep = safe_div(damage, sheep_thrown)
+        damage_per_kill = safe_div(damage, kills)
         void_kdr = safe_div(kills_void, deaths_void) if deaths_void else kills_void
         wools_per_game = safe_div(magic_wools, games)
         explosive_kdr = safe_div(kills_explosive, deaths_explosive) if deaths_explosive else kills_explosive
@@ -2924,7 +3013,7 @@ class StatsFullView(discord.ui.View):
 
         stats = {
             "username": self.ign,
-            "guild": f"[{self.guild_tag}]" if self.guild_tag else "N/A",
+            "guild": f"[{_safe_guild_tag(self.guild_tag)}]" if _safe_guild_tag(self.guild_tag) else "N/A",
             "playtime": format_playtime(int(playtime_seconds)) if playtime_seconds else "0s",
             "level": fmt_int(self._get_value('level', tab_name)),
             "exp_per_hour": fmt_ratio(exp_per_hour),
@@ -2944,6 +3033,7 @@ class StatsFullView(discord.ui.View):
             "kills_per_win": fmt_ratio(kills_per_win),
             "damage": fmt_int(damage),
             "damage_per_game": fmt_ratio(damage_per_game),
+            "damage_per_kill": fmt_ratio(damage_per_kill),
             "damage_per_sheep": fmt_ratio(damage_per_sheep),
             "void_kills": fmt_int(kills_void),
             "void_deaths": fmt_int(deaths_void),
@@ -2965,9 +3055,9 @@ class StatsFullView(discord.ui.View):
         }
 
         ordered_fields = [
-            ("Wins", stats["wins"]), ("Losses", stats["losses"]), ("WLR", stats["wlr"]), ("Layers", stats["layers"]), ("Coins", stats["coins"]),
+            ("Wins", stats["wins"]), ("Losses", stats["losses"]), ("WLR", stats["wlr"]), ("Damage/Game", stats["damage_per_game"]), ("Coins", stats["coins"]),
             ("Kills", stats["kills"]), ("Deaths", stats["deaths"]), ("KDR", stats["kdr"]), ("Kill/Game", stats["kills_per_game"]), ("Kill/Win", stats["kills_per_win"]),
-            ("Damage dealt", stats["damage"]), ("Damage/Game", stats["damage_per_game"]), ("Void kills", stats["void_kills"]), ("Void deaths", stats["void_deaths"]), ("Void KDR", stats["void_kdr"]),
+            ("Damage dealt", stats["damage"]), ("Damage/Kill", stats["damage_per_kill"]), ("Void kills", stats["void_kills"]), ("Void deaths", stats["void_deaths"]), ("Void KDR", stats["void_kdr"]),
             ("Magic wools", stats["magic_wools"]), ("Wools/Game", stats["wools_per_game"]), ("Explosive kills", stats["explosive_kills"]), ("Explosive deaths", stats["explosive_deaths"]), ("Explosive KDR", stats["explosive_kdr"]),
             ("Sheeps thrown", stats["sheeps_thrown"]), ("Sheeps thrown/Game", stats["sheeps_per_game"]), ("Bow kills", stats["bow_kills"]), ("Bow deaths", stats["bow_deaths"]), ("Bow KDR", stats["bow_kdr"]),
             ("Games Played", stats["games_played"]), ("Damage/Sheep", stats["damage_per_sheep"]), ("Meelee kills", stats["melee_kills"]), ("Meelee Deaths", stats["melee_deaths"]), ("Meelee KDR", stats["melee_kdr"]),
@@ -3227,17 +3317,6 @@ class LeaderboardView(discord.ui.View):
             "playtime": "Playtime",
         }
         
-        # Load user colors
-        self.user_colors = {}
-        try:
-            usernames = get_all_usernames()
-            for username in usernames:
-                meta = get_user_meta(username)
-                if meta and meta.get('ign_color'):
-                    self.user_colors[username.lower()] = meta.get('ign_color')
-        except Exception as e:
-            print(f"[WARNING] Failed to load user colors: {e}")
-
         # Period selector dropdown
         self.period_select = LeaderboardPeriodSelect(self)
         self.add_item(self.period_select)
@@ -3386,6 +3465,10 @@ def _load_leaderboard_data_from_excel(metric: str):
         
         # Load user colors
         user_colors = load_user_colors()
+        if not user_colors:
+            print("[WARN] No user colors loaded in leaderboard generation")
+        else:
+            print(f"[DEBUG] Loaded {len(user_colors)} user colors for leaderboard")
         
         for username in usernames:
             try:
@@ -3407,10 +3490,14 @@ def _load_leaderboard_data_from_excel(metric: str):
                 else:
                     level = int(level) if level else 0
                 
-                icon = ""
-                ign_color = user_meta.get("color", "#FFFFFF")
+                icon = user_meta.get("icon") or ""
+                ign_color = user_meta.get("color")
+                if not ign_color:
+                    ign_color = get_rank_color_hex(user_meta.get("rank"))
+                
                 guild_tag = user_meta.get("guild_tag")
-                raw_g = str(user_meta.get('guild_color', 'GRAY')).upper()
+                # Fix: Handle None correctly for guild_color
+                raw_g = str(user_meta.get('guild_color') or 'GRAY').upper()
                 guild_color = raw_g if raw_g.startswith('#') else MINECRAFT_NAME_TO_HEX.get(raw_g, "#AAAAAA")
                 
                 # Process each period
@@ -3586,6 +3673,10 @@ def _load_ratio_leaderboard_data_from_excel(metric: str):
         
         # Load user colors
         user_colors = load_user_colors()
+        if not user_colors:
+            print("[WARN] No user colors loaded in ratio leaderboard generation")
+        else:
+            print(f"[DEBUG] Loaded {len(user_colors)} user colors for ratio leaderboard")
         
         for username in usernames:
             try:
@@ -3607,10 +3698,14 @@ def _load_ratio_leaderboard_data_from_excel(metric: str):
                 else:
                     level = int(level) if level else 0
                 
-                icon = ""
-                ign_color = user_meta.get("color", "#FFFFFF")
+                icon = user_meta.get("icon") or ""
+                ign_color = user_meta.get("color")
+                if not ign_color:
+                    ign_color = get_rank_color_hex(user_meta.get("rank"))
+                
                 guild_tag = user_meta.get("guild_tag")
-                raw_g = str(user_meta.get('guild_color', 'GRAY')).upper()
+                # Fix: Handle None correctly for guild_color
+                raw_g = str(user_meta.get('guild_color') or 'GRAY').upper()
                 guild_color = raw_g if raw_g.startswith('#') else MINECRAFT_NAME_TO_HEX.get(raw_g, "#AAAAAA")
                 
                 # Process each period
@@ -3919,6 +4014,17 @@ class ApprovalView(discord.ui.View):
         self.approved = None
         self.done_event = asyncio.Event()
         self.processed_by_admin_command = False
+        self.admin_messages = []
+    
+    async def _update_other_admins(self, interaction: discord.Interaction, action: str):
+        admin_name = interaction.user.name
+        for msg in self.admin_messages:
+            if msg.id == interaction.message.id:
+                continue
+            try:
+                await msg.edit(content=f"{admin_name} {action} claim for {self.ign}.", view=None)
+            except Exception:
+                pass
     
     @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
     async def accept_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -3926,6 +4032,7 @@ class ApprovalView(discord.ui.View):
         PENDING_CLAIMS.pop(self.requester_id, None)
         self.done_event.set()
         await interaction.response.edit_message(content=f"You accepted claim for {self.ign}.", view=None)
+        await self._update_other_admins(interaction, "accepted")
     
     @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger)
     async def deny_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -3933,6 +4040,7 @@ class ApprovalView(discord.ui.View):
         PENDING_CLAIMS.pop(self.requester_id, None)
         self.done_event.set()
         await interaction.response.edit_message(content=f"You denied claim for {self.ign}.", view=None)
+        await self._update_other_admins(interaction, "denied")
 
 
 class StreakApprovalView(discord.ui.View):
@@ -3945,6 +4053,17 @@ class StreakApprovalView(discord.ui.View):
         self.approved = None
         self.done_event = asyncio.Event()
         self.processed_by_admin_command = False
+        self.admin_messages = []
+
+    async def _update_other_admins(self, interaction: discord.Interaction, action: str):
+        admin_name = interaction.user.name
+        for msg in self.admin_messages:
+            if msg.id == interaction.message.id:
+                continue
+            try:
+                await msg.edit(content=f"{admin_name} {action} streak tracking for {self.ign}.", view=None)
+            except Exception:
+                pass
 
     @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
     async def accept_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -3960,6 +4079,7 @@ class StreakApprovalView(discord.ui.View):
             except Exception:
                 pass
             await interaction.response.edit_message(content=f"You approved streak tracking for {self.ign}.", view=None)
+            await self._update_other_admins(interaction, "approved")
         except Exception as e:
             await interaction.response.edit_message(content=f"[ERROR] Failed to initialize streaks: {e}", view=None)
 
@@ -3975,6 +4095,7 @@ class StreakApprovalView(discord.ui.View):
         except Exception:
             pass
         await interaction.response.edit_message(content=f"You denied streak tracking for {self.ign}.", view=None)
+        await self._update_other_admins(interaction, "denied")
 
 
 class StreakRequestView(discord.ui.View):
@@ -4015,11 +4136,12 @@ class StreakRequestView(discord.ui.View):
         sent_count = 0
         for admin in admins:
             try:
-                await admin.send(
+                msg = await admin.send(
                     f"{self.requester.name} ({self.requester_id}) requests streak tracking for {self.ign}.\n"
                     f"Click Accept/Deny below or run /verification-streak user:{self.requester_id} option: accept/deny.",
                     view=view,
                 )
+                view.admin_messages.append(msg)
                 sent_count += 1
             except Exception:
                 pass
@@ -4086,6 +4208,7 @@ async def on_ready():
         bot.background_tasks = [
             bot.loop.create_task(scheduler_loop()),
             bot.loop.create_task(staggered_stats_refresher(interval_minutes=10)),
+            bot.loop.create_task(streak_stats_refresher(interval_seconds=60)),
             bot.loop.create_task(presence_updater_loop(interval_seconds=5))
         ]
         bot.background_tasks_started = True
@@ -4211,11 +4334,12 @@ async def claim(interaction: discord.Interaction, ign: str):
         sent_count = 0
         for admin in admins:
             try:
-                await admin.send(
+                msg = await admin.send(
                     f"{requester_name} ({interaction.user.id}) wants to claim {ign}.\n"
                     f"Click Accept/Deny below or run /verification user:{interaction.user.id} option: accept/deny.",
                     view=view,
                 )
+                view.admin_messages.append(msg)
                 sent_count += 1
             except Exception:
                 pass
@@ -4258,8 +4382,8 @@ async def unclaim(interaction: discord.Interaction, ign: str):
             return
     
     # Check if user is authorized to unclaim this username
-    if not is_user_authorized(interaction.user.id, ign):
-        await interaction.followup.send(f"[ERROR] You are not authorized to unclaim {ign}. Only the user who claimed this username can unclaim it.")
+    if not (is_admin(interaction.user) or is_user_authorized(interaction.user.id, ign)):
+        await interaction.followup.send(f"[ERROR] You are not authorized to unclaim {ign}. Only the user who claimed this username or an admin can unclaim it.")
         return
     
     try:
@@ -4312,6 +4436,15 @@ async def verification(interaction: discord.Interaction, option: discord.app_com
         view.approved = approved
         view.processed_by_admin_command = True
         view.done_event.set()
+        
+        # Update admin messages
+        admin_name = interaction.user.name
+        action_text = "accepted" if approved else "denied"
+        for msg in getattr(view, 'admin_messages', []):
+            try:
+                await msg.edit(content=f"{admin_name} {action_text} claim for {ign} (via command).", view=None)
+            except Exception:
+                pass
 
     requester_user = None
     try:
@@ -4381,6 +4514,14 @@ async def verification_streak(interaction: discord.Interaction, option: discord.
             view.approved = True
             view.processed_by_admin_command = True
             view.done_event.set()
+            
+            # Update admin messages
+            admin_name = interaction.user.name
+            for msg in getattr(view, 'admin_messages', []):
+                try:
+                    await msg.edit(content=f"{admin_name} approved streak tracking for {ign} (via command).", view=None)
+                except Exception:
+                    pass
         if requester_user:
             try:
                 await requester_user.send(f"✅ Your streak tracking request for {ign} was approved by an admin.")
@@ -4392,6 +4533,14 @@ async def verification_streak(interaction: discord.Interaction, option: discord.
             view.approved = False
             view.processed_by_admin_command = True
             view.done_event.set()
+            
+            # Update admin messages
+            admin_name = interaction.user.name
+            for msg in getattr(view, 'admin_messages', []):
+                try:
+                    await msg.edit(content=f"{admin_name} denied streak tracking for {ign} (via command).", view=None)
+                except Exception:
+                    pass
         if requester_user:
             try:
                 await requester_user.send(f"❌ Your streak tracking request for {ign} was denied by an admin.")
@@ -4488,8 +4637,8 @@ async def color(interaction: discord.Interaction, ign: str = None, color: discor
             pass
     
     # Check if user is authorized to change color for this username
-    if not is_user_authorized(interaction.user.id, ign):
-        await interaction.followup.send(f"[ERROR] You are not authorized to change the color for {ign}. Only the user who claimed this username can change its color.", ephemeral=True)
+    if not (is_admin(interaction.user) or is_user_authorized(interaction.user.id, ign)):
+        await interaction.followup.send(f"[ERROR] You are not authorized to change the color for {ign}. Only the user who claimed this username or an admin can change its color.", ephemeral=True)
         return
     
     try:
@@ -4528,8 +4677,8 @@ async def reset(interaction: discord.Interaction, ign: str = None):
             pass
     
     # Check if user is authorized to reset session for this username
-    if not is_user_authorized(interaction.user.id, ign):
-        await interaction.followup.send(f"[ERROR] You are not authorized to reset session for {ign}. Only the user who claimed this username can reset its session.", ephemeral=True)
+    if not (is_admin(interaction.user) or is_user_authorized(interaction.user.id, ign)):
+        await interaction.followup.send(f"[ERROR] You are not authorized to reset session for {ign}. Only the user who claimed this username or an admin can reset its session.", ephemeral=True)
         return
     
     try:
@@ -4923,7 +5072,7 @@ async def fixguilds(interaction: discord.Interaction):
     
     try:
         # Run the fix script
-        result = await asyncio.to_thread(run_script, "fix_guilds.py", [])
+        result = await asyncio.to_thread(run_script, "fix_guilds.py", [], timeout=600)
         
         if result.returncode == 0:
             # Force cache refresh so the bot sees the new tags immediately

@@ -67,6 +67,14 @@ def init_database(db_path: Optional[Path] = None):
                 guild_hex TEXT DEFAULT NULL
             )
         ''')
+
+        # Migration: Check if 'rank' column exists in user_meta
+        cursor.execute("PRAGMA table_info(user_meta)")
+        columns = [info['name'] for info in cursor.fetchall()]
+        if 'rank' not in columns:
+            print("[DB] Adding 'rank' column to user_meta table...")
+            cursor.execute("ALTER TABLE user_meta ADD COLUMN rank TEXT DEFAULT NULL")
+            conn.commit()
         
         # User links table - maps usernames to Discord IDs
         cursor.execute('''
@@ -168,9 +176,9 @@ def get_user_meta(username: str) -> Optional[Dict]:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT level, icon, ign_color, guild_tag, guild_hex
+            SELECT level, icon, ign_color, guild_tag, guild_hex, rank
             FROM user_meta
-            WHERE username = ?
+            WHERE LOWER(username) = LOWER(?)
         ''', (username,))
         
         row = cursor.fetchone()
@@ -180,9 +188,33 @@ def get_user_meta(username: str) -> Optional[Dict]:
                 'icon': row[1],
                 'ign_color': row[2],
                 'guild_tag': row[3],
-                'guild_hex': row[4]
+                'guild_hex': row[4],
+                'rank': row[5] if len(row) > 5 else None
             }
         return None
+
+
+def get_all_user_meta() -> Dict[str, Dict]:
+    """Get metadata for all users.
+    
+    Returns:
+        Dict mapping username to metadata dict
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT username, level, icon, ign_color, guild_tag, guild_hex, rank FROM user_meta')
+        
+        result = {}
+        for row in cursor.fetchall():
+            result[row['username']] = {
+                'level': row['level'],
+                'icon': row['icon'],
+                'ign_color': row['ign_color'],
+                'guild_tag': row['guild_tag'],
+                'guild_hex': row['guild_hex'],
+                'rank': row['rank']
+            }
+        return result
 
 
 def update_user_stats(username: str, stats: Dict[str, float], 
@@ -292,7 +324,8 @@ def get_user_stats_with_deltas(username: str) -> Dict[str, Dict[str, float]]:
 def update_user_meta(username: str, level: Optional[int] = None, icon: Optional[str] = None,
                     ign_color: Optional[str] = None,
                     guild_tag: Optional[str] = None,
-                    guild_hex: Optional[str] = None):
+                    guild_hex: Optional[str] = None,
+                    rank: Optional[str] = None):
     """Update user metadata.
     
     None values are ignored (existing values preserved).
@@ -302,11 +335,12 @@ def update_user_meta(username: str, level: Optional[int] = None, icon: Optional[
         cursor = conn.cursor()
         
         # Check if user exists
-        cursor.execute('SELECT * FROM user_meta WHERE username = ?', (username,))
+        cursor.execute('SELECT username FROM user_meta WHERE LOWER(username) = LOWER(?)', (username,))
         row = cursor.fetchone()
         
         if row:
             # Update existing record - only update fields that are not None
+            target_username = row['username']
             updates = []
             params = []
             
@@ -326,24 +360,28 @@ def update_user_meta(username: str, level: Optional[int] = None, icon: Optional[
             if guild_hex is not None:
                 updates.append("guild_hex = ?")
                 params.append(guild_hex if guild_hex != "" else None)
+            if rank is not None:
+                updates.append("rank = ?")
+                params.append(rank)
             
             if updates:
-                params.append(username)
+                params.append(target_username)
                 sql = f"UPDATE user_meta SET {', '.join(updates)} WHERE username = ?"
                 cursor.execute(sql, params)
         else:
             # Insert new record
             cursor.execute('''
                 INSERT INTO user_meta 
-                (username, level, icon, ign_color, guild_tag, guild_hex)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (username, level, icon, ign_color, guild_tag, guild_hex, rank)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (
                 username, 
                 level if level is not None else 0, 
                 icon if icon is not None else '', 
                 ign_color if ign_color != "" else None, 
                 str(guild_tag) if guild_tag and guild_tag != "" else None, 
-                guild_hex if guild_hex != "" else None
+                guild_hex if guild_hex != "" else None,
+                rank
             ))
         
         conn.commit()
