@@ -1126,27 +1126,30 @@ def render_stat_box(label: str, value: str, width: int = 200, height: int = 80):
     if Image is None:
         raise RuntimeError("Pillow not available")
     
-    # Determine color based on label content for consistency with sheepwars command
+    # Determine color based on label content - updated to match new layout
     color = (255, 255, 255)
     l = label.lower()
-    if "kdr" in l or "wlr" in l or "win" in l:
-        color = (85, 255, 85)
-    elif "loss" in l or "death" in l:
-        color = (255, 85, 85)
+    
+    # Row 1 colors
+    if "wins/hour" in l or "kills/hour" in l:
+        color = (170, 85, 255)  # Purple
     elif "playtime" in l:
-        color = (255, 85, 255)
-    elif "damage" in l:
-        color = (255, 170, 0)
-    elif "exp" in l:
-        color = (85, 255, 255)
-    elif "coin" in l:
-        color = (255, 215, 0)
-    elif "bow" in l:
-        color = (255, 255, 85)
-    elif "void" in l:
-        color = (170, 0, 170)
-    elif "sheep" in l or "wool" in l:
-        color = (200, 200, 200)
+        color = (255, 85, 255)  # Magenta
+    elif "exp/hour" in l or "exp/game" in l:
+        color = (85, 255, 255)  # Cyan
+    # Row 2+ colors - specific order matters
+    elif l == "wins" or l == "kills" or l == "void kills" or l == "explosive kills" or l == "bow kills" or l == "melee kills":
+        color = (85, 255, 85)  # Green
+    elif l == "losses" or l == "deaths" or l == "void deaths" or l == "explosive deaths" or l == "bow deaths" or l == "melee deaths":
+        color = (255, 85, 85)  # Red
+    elif "kdr" in l or l == "wlr":
+        color = (255, 170, 0)  # Orange for ratios
+    elif "coins" in l or l == "layers":
+        color = (255, 215, 0)  # Yellow
+    elif l == "damage dealt" or l == "sheep thrown" or l == "games played" or l == "magic wool hit":
+        color = (85, 170, 255)  # Blue
+    elif "/game" in l or "/sheep" in l or "survival rate" in l:
+        color = (255, 170, 0)  # Orange for all per-game/per-sheep stats and survival rate
         
     return render_modern_card(label, value, width, height, color=color)
 
@@ -1273,52 +1276,52 @@ def create_full_stats_image(ign: str, tab_name: str, level: int, icon: str, stat
     lines = [
         [
             ("Wins/Hour", stats.get("wins_per_hour", "0")),
-            ("Exp/Hour", stats.get("exp_per_hour", "0")),
+            ("Kills/Hour", stats.get("kills_per_hour", "0")),
             ("Playtime", stats.get("playtime", "0")),
             ("Exp/Game", stats.get("exp_per_game", "0")),
-            ("Kills/Hour", stats.get("kills_per_hour", "0")),
+            ("Exp/Hour", stats.get("exp_per_hour", "0")),
         ],
         [
             ("Wins", stats.get("wins", "0")),
             ("Losses", stats.get("losses", "0")),
             ("WLR", stats.get("wlr", "0")),
-            ("Damage/Game", stats.get("damage_per_game", "0")),
-            ("Coins", stats.get("coins", "0")),
+            ("Coins (Wool)", stats.get("coins", "0")),
+            ("Layers", stats.get("layers", "0")),
         ],
         [
             ("Kills", stats.get("kills", "0")),
             ("Deaths", stats.get("deaths", "0")),
             ("KDR", stats.get("kdr", "0")),
-            ("Kill/Game", stats.get("kills_per_game", "0")),
-            ("Kill/Win", stats.get("kills_per_win", "0")),
+            ("Damage dealt", stats.get("damage", "0")),
+            ("Sheep thrown", stats.get("sheeps_thrown", "0")),
         ],
         [
-            ("Damage dealt", stats.get("damage", "0")),
-            ("Damage/Kill", stats.get("damage_per_kill", "0")),
             ("Void kills", stats.get("void_kills", "0")),
             ("Void deaths", stats.get("void_deaths", "0")),
             ("Void KDR", stats.get("void_kdr", "0")),
+            ("Games played", stats.get("games_played", "0")),
+            ("Magic wool hit", stats.get("magic_wools", "0")),
         ],
         [
-            ("Magic wools", stats.get("magic_wools", "0")),
-            ("Wools/Game", stats.get("wools_per_game", "0")),
             ("Explosive kills", stats.get("explosive_kills", "0")),
             ("Explosive deaths", stats.get("explosive_deaths", "0")),
             ("Explosive KDR", stats.get("explosive_kdr", "0")),
+            ("Damage/Game", stats.get("damage_per_game", "0")),
+            ("Sheeps/Game", stats.get("sheeps_per_game", "0")),
         ],
         [
-            ("Sheeps thrown", stats.get("sheeps_thrown", "0")),
-            ("Sheeps thrown/Game", stats.get("sheeps_per_game", "0")),
             ("Bow kills", stats.get("bow_kills", "0")),
             ("Bow deaths", stats.get("bow_deaths", "0")),
             ("Bow KDR", stats.get("bow_kdr", "0")),
+            ("Kill/Game", stats.get("kills_per_game", "0")),
+            ("Wools/Game", stats.get("wools_per_game", "0")),
         ],
         [
-            ("Games Played", stats.get("games_played", "0")),
-            ("Damage/Sheep", stats.get("damage_per_sheep", "0")),
             ("Melee kills", stats.get("melee_kills", "0")),
             ("Melee deaths", stats.get("melee_deaths", "0")),
             ("Melee KDR", stats.get("melee_kdr", "0")),
+            ("Damage/Sheep", stats.get("damage_per_sheep", "0")),
+            ("Survival rate", stats.get("survival_rate", "0")),
         ],
     ]
 
@@ -1453,6 +1456,194 @@ def create_streaks_image(ign: str, level: int, icon: str, ign_color: str, guild_
     return out
 
 
+def create_compare_stats_image(ign1: str, ign2: str, tab_name: str, stats1: dict, stats2: dict, 
+                                level1: int, level2: int, icon1: str, icon2: str,
+                                ign_color1: str = None, ign_color2: str = None,
+                                guild_tag1: str = None, guild_tag2: str = None,
+                                guild_color1: str = None, guild_color2: str = None) -> io.BytesIO:
+    """Render comparison stats with ign1 in blue, ign2 in red, and stat labels in magenta."""
+    if Image is None:
+        raise RuntimeError("Pillow not available")
+
+    # Force blue and red colors for comparison
+    blue_color = "#55AAFF"  # Blue for ign1
+    red_color = "#FF5555"   # Red for ign2
+
+    # Create title with both players using forced colors
+    title_io1 = render_prestige_with_text(level1, icon1, ign1, "", blue_color, guild_tag1, guild_color1, two_line=False)
+    title_img1 = Image.open(title_io1)
+    
+    title_io2 = render_prestige_with_text(level2, icon2, ign2, "", red_color, guild_tag2, guild_color2, two_line=False)
+    title_img2 = Image.open(title_io2)
+    
+    # Scale up usernames to match VS text size (1.5x larger)
+    scale_factor = 1.5
+    new_width1 = int(title_img1.width * scale_factor)
+    new_height1 = int(title_img1.height * scale_factor)
+    title_img1 = title_img1.resize((new_width1, new_height1), Image.LANCZOS)
+    
+    new_width2 = int(title_img2.width * scale_factor)
+    new_height2 = int(title_img2.height * scale_factor)
+    title_img2 = title_img2.resize((new_width2, new_height2), Image.LANCZOS)
+    
+    # Title section with VS text - adjusted spacing
+    spacing_title = 15
+    vs_width = 60  # Reduced from 80
+    title_width = title_img1.width + vs_width + spacing_title * 2 + title_img2.width
+    title_height = max(title_img1.height, title_img2.height)
+    
+    title_composite = Image.new('RGBA', (title_width, title_height), (0, 0, 0, 0))
+    title_composite.paste(title_img1, (0, (title_height - title_img1.height) // 2), title_img1 if title_img1.mode == 'RGBA' else None)
+    
+    # Draw "VS" text with smaller font
+    draw_vs = ImageDraw.Draw(title_composite)
+    font_vs = _load_font("DejaVuSans-Bold.ttf", 24)  # Reduced from 36
+    vs_text = "VS"
+    vs_bbox = draw_vs.textbbox((0, 0), vs_text, font=font_vs)
+    vs_text_w = vs_bbox[2] - vs_bbox[0]
+    vs_text_h = vs_bbox[3] - vs_bbox[1]
+    vs_x = title_img1.width + spacing_title + (vs_width - vs_text_w) // 2
+    vs_y = (title_height - vs_text_h) // 2
+    draw_vs.text((vs_x, vs_y), vs_text, font=font_vs, fill=(200, 200, 200))
+    
+    title_composite.paste(title_img2, (title_img1.width + vs_width + spacing_title * 2, (title_height - title_img2.height) // 2), title_img2 if title_img2.mode == 'RGBA' else None)
+
+    # Tab name label
+    tab_label_height = 40
+    tab_label = Image.new('RGBA', (title_width, tab_label_height), (0, 0, 0, 0))
+    draw_tab = ImageDraw.Draw(tab_label)
+    font_tab = _load_font("DejaVuSans-Bold.ttf", 24)
+    tab_text = f"{tab_name.title()} Stats Comparison"
+    tab_bbox = draw_tab.textbbox((0, 0), tab_text, font=font_tab)
+    tab_text_w = tab_bbox[2] - tab_bbox[0]
+    draw_tab.text(((title_width - tab_text_w) // 2, 5), tab_text, font=font_tab, fill=(255, 255, 255))
+
+    # Stats layout - stat name in magenta, then ign1 value (blue), then ign2 value (red)
+    box_width = 200
+    box_height = 80
+    spacing = 10
+    
+    # Colors
+    magenta = (255, 85, 255)  # magenta for stat labels
+    blue = (85, 170, 255)      # blue for ign1
+    red = (255, 85, 85)        # red for ign2
+    
+    # Build lines from stats (same layout as full stats)
+    stat_keys = [
+        [("Wins/Hour", "wins_per_hour"), ("Kills/Hour", "kills_per_hour"), ("Playtime", "playtime"), ("Exp/Game", "exp_per_game"), ("Exp/Hour", "exp_per_hour")],
+        [("Wins", "wins"), ("Losses", "losses"), ("WLR", "wlr"), ("Coins (Wool)", "coins"), ("Layers", "layers")],
+        [("Kills", "kills"), ("Deaths", "deaths"), ("KDR", "kdr"), ("Damage dealt", "damage"), ("Sheep thrown", "sheeps_thrown")],
+        [("Void kills", "void_kills"), ("Void deaths", "void_deaths"), ("Void KDR", "void_kdr"), ("Games played", "games_played"), ("Magic wool hit", "magic_wools")],
+        [("Explosive kills", "explosive_kills"), ("Explosive deaths", "explosive_deaths"), ("Explosive KDR", "explosive_kdr"), ("Damage/Game", "damage_per_game"), ("Sheeps/Game", "sheeps_per_game")],
+        [("Bow kills", "bow_kills"), ("Bow deaths", "bow_deaths"), ("Bow KDR", "bow_kdr"), ("Kill/Game", "kills_per_game"), ("Wools/Game", "wools_per_game")],
+        [("Melee kills", "melee_kills"), ("Melee deaths", "melee_deaths"), ("Melee KDR", "melee_kdr"), ("Damage/Sheep", "damage_per_sheep"), ("Survival rate", "survival_rate")],
+    ]
+    
+    # Render all comparison boxes - single unified box with 3 text lines
+    rendered_lines = []
+    for line_idx, line in enumerate(stat_keys):
+        rendered = []
+        for col_idx, (label, key) in enumerate(line):
+            value1 = stats1.get(key, "0")
+            value2 = stats2.get(key, "0")
+            try:
+                # Create a single unified box
+                img = Image.new('RGBA', (int(box_width), int(box_height)), (0, 0, 0, 0))
+                draw = ImageDraw.Draw(img)
+                card_bg = (35, 30, 45, 240) 
+                draw.rounded_rectangle([0, 0, box_width-1, box_height-1], radius=15, fill=card_bg)
+                
+                # Font sizes
+                font_label = _load_font("DejaVuSans-Bold.ttf", 13)
+                font_value = _load_font("DejaVuSans-Bold.ttf", 18)
+                
+                # Calculate vertical spacing for 3 lines
+                line_height = box_height / 3
+                
+                # Draw label in white (top third)
+                l_text = f"{label.upper()}"
+                l_bbox = draw.textbbox((0, 0), l_text, font=font_label)
+                l_w = l_bbox[2] - l_bbox[0]
+                draw.text(((box_width - l_w) // 2, int(line_height * 0.5) - 9), l_text, font=font_label, fill=(255, 255, 255))
+                
+                # Draw ign1 value in blue (middle third)
+                v1_text = str(value1)
+                draw.text((box_width // 2, int(line_height * 1.5)), v1_text, font=font_value, fill=blue, anchor="mm")
+                
+                # Draw ign2 value in red (bottom third)
+                v2_text = str(value2)
+                draw.text((box_width // 2, int(line_height * 2.5)), v2_text, font=font_value, fill=red, anchor="mm")
+                
+                rendered.append(img)
+            except Exception as e:
+                print(f"[WARNING] Failed to render comparison box {label}: {e}")
+        rendered_lines.append(rendered)
+    
+    # Compute dimensions
+    max_boxes = 5
+    line_width_max = box_width * max_boxes + spacing * (max_boxes - 1)
+    line_heights = [box_height for _ in rendered_lines]
+    
+    line_widths = []
+    for line in rendered_lines:
+        line_width = 0
+        for i, box in enumerate(line):
+            line_width += box.width
+            if i < len(line) - 1:
+                line_width += spacing
+        line_widths.append(line_width)
+    
+    grid_height = sum(line_heights) + spacing * (len(rendered_lines) - 1)
+    grid_width = line_width_max
+    
+    margin_x = 40
+    
+    # Scale title if too wide
+    if title_width > grid_width:
+        scale_factor = grid_width / title_width
+        new_title_width = grid_width
+        new_title_height = int(title_height * scale_factor)
+        title_composite = title_composite.resize((new_title_width, new_title_height), Image.LANCZOS)
+        title_width = new_title_width
+        title_height = new_title_height
+        
+        # Also scale tab label
+        tab_label = tab_label.resize((new_title_width, int(tab_label_height * scale_factor)), Image.LANCZOS)
+        tab_label_height = int(tab_label_height * scale_factor)
+    
+    composite_width = grid_width + (margin_x * 2)
+    title_x_offset = (composite_width - title_width) // 2
+    bottom_padding = 40
+    composite_height = title_height + tab_label_height + spacing + grid_height + bottom_padding
+    
+    composite = Image.new('RGBA', (composite_width, composite_height), (18, 18, 20, 255))
+    composite.paste(title_composite, (title_x_offset, 0), title_composite if title_composite.mode == 'RGBA' else None)
+    composite.paste(tab_label, (title_x_offset, title_height), tab_label if tab_label.mode == 'RGBA' else None)
+    
+    # Paste lines centered horizontally
+    y_offset = title_height + tab_label_height + spacing
+    for idx, line in enumerate(rendered_lines):
+        line_width = line_widths[idx]
+        x_start = margin_x + (grid_width - line_width) // 2 if line_width > 0 else margin_x
+        x = x_start
+        for box in line:
+            composite.paste(box, (x, y_offset), box)
+            x += box.width + spacing
+        y_offset += line_heights[idx] + spacing
+    
+    # Footer
+    draw = ImageDraw.Draw(composite)
+    footer_text = "Made with ❤ by chuckegg & felix"
+    font_footer = _load_font("DejaVuSans.ttf", 14)
+    bbox = draw.textbbox((0, 0), footer_text, font=font_footer)
+    text_w = bbox[2] - bbox[0]
+    draw.text(((composite_width - text_w) // 2, composite_height - 30), footer_text, font=font_footer, fill=(60, 60, 65))
+    
+    out = io.BytesIO()
+    composite.save(out, format='PNG')
+    out.seek(0)
+    return out
+
 
 def create_leaderboard_image(tab_name: str, metric_label: str, leaderboard_data: list, page: int = 0, total_pages: int = 1) -> io.BytesIO:
     # Design constants matching sheepwars command
@@ -1540,7 +1731,7 @@ def create_leaderboard_image(tab_name: str, metric_label: str, leaderboard_data:
         # Value
         if is_playtime:
             val_str = format_playtime(int(value))
-        elif "Ratio" in metric_label or "/" in metric_label or "Per" in metric_label:
+        elif "Ratio" in metric_label or "/" in metric_label or "Per" in metric_label or "Rate" in metric_label:
             val_str = f"{float(value):,.2f}"
         else:
             val_str = f"{int(value):,}"
@@ -3010,6 +3201,7 @@ class StatsFullView(discord.ui.View):
         sheeps_per_game = safe_div(sheep_thrown, games)
         bow_kdr = safe_div(kills_bow, deaths_bow) if deaths_bow else kills_bow
         melee_kdr = safe_div(kills_melee, deaths_melee) if deaths_melee else kills_melee
+        survival_rate = safe_div(games - deaths, games) if games else 0
 
         stats = {
             "username": self.ign,
@@ -3052,6 +3244,7 @@ class StatsFullView(discord.ui.View):
             "melee_kills": fmt_int(kills_melee),
             "melee_deaths": fmt_int(deaths_melee),
             "melee_kdr": fmt_ratio(melee_kdr),
+            "survival_rate": fmt_ratio(survival_rate),
         }
 
         ordered_fields = [
@@ -3130,6 +3323,231 @@ class StatsFullView(discord.ui.View):
         self.current_tab = "monthly"
         self.update_buttons()
         embed, file = self.generate_full_image(self.current_tab)
+        if file:
+            await interaction.response.edit_message(view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+
+
+class CompareView(discord.ui.View):
+    def __init__(self, user_data1, user_data2, ign1: str, ign2: str):
+        super().__init__()
+        self.ign1 = ign1
+        self.ign2 = ign2
+        self.user_data1 = user_data1
+        self.user_data2 = user_data2
+        self.meta1 = user_data1.get("meta", {})
+        self.meta2 = user_data2.get("meta", {})
+        self.current_tab = "all-time"
+        self._load_colors()
+        
+        self.update_buttons()
+
+    def _load_colors(self):
+        """Load colors and guild info for both usernames from database"""
+        self.ign_color1 = None
+        self.guild_tag1 = None
+        self.guild_color1 = None
+        self.ign_color2 = None
+        self.guild_tag2 = None
+        self.guild_color2 = None
+        
+        try:
+            meta1 = get_user_meta(self.ign1)
+            if meta1:
+                self.ign_color1 = meta1.get('ign_color')
+                if not self.ign_color1:
+                    self.ign_color1 = get_rank_color_hex(meta1.get('rank'))
+                self.guild_tag1 = meta1.get('guild_tag')
+                self.guild_color1 = meta1.get('guild_hex')
+        except Exception as e:
+            print(f"[WARNING] Failed to load color for {self.ign1}: {e}")
+        
+        try:
+            meta2 = get_user_meta(self.ign2)
+            if meta2:
+                self.ign_color2 = meta2.get('ign_color')
+                if not self.ign_color2:
+                    self.ign_color2 = get_rank_color_hex(meta2.get('rank'))
+                self.guild_tag2 = meta2.get('guild_tag')
+                self.guild_color2 = meta2.get('guild_hex')
+        except Exception as e:
+            print(f"[WARNING] Failed to load color for {self.ign2}: {e}")
+
+    def _get_value(self, user_data, stat_key: str, tab_name: str) -> float:
+        # Map tab names to cache keys
+        key_map = {"all-time": "lifetime"}
+        cache_key = key_map.get(tab_name, tab_name)
+        return user_data.get("stats", {}).get(stat_key.lower(), {}).get(cache_key, 0)
+
+    def _collect_stats(self, user_data, tab_name: str) -> dict:
+        def safe_div(n, d):
+            return n / d if d else 0
+        def fmt_int(v):
+            return f"{int(round(v)):,}"
+        def fmt_ratio(v):
+            return f"{v:.2f}"
+
+        # Base values
+        experience = self._get_value(user_data, 'experience', tab_name)
+        playtime_seconds = self._get_value(user_data, 'playtime', tab_name)
+        games = self._get_value(user_data, 'games_played', tab_name)
+        wins = self._get_value(user_data, 'wins', tab_name)
+        losses = self._get_value(user_data, 'losses', tab_name)
+        kills = self._get_value(user_data, 'kills', tab_name)
+        deaths = self._get_value(user_data, 'deaths', tab_name)
+        coins = self._get_value(user_data, 'coins', tab_name)
+        layers = self._get_value(user_data, 'available_layers', tab_name)
+        damage = self._get_value(user_data, 'damage_dealt', tab_name)
+        kills_void = self._get_value(user_data, 'kills_void', tab_name)
+        deaths_void = self._get_value(user_data, 'deaths_void', tab_name)
+        magic_wools = self._get_value(user_data, 'magic_wool_hit', tab_name)
+        kills_explosive = self._get_value(user_data, 'kills_explosive', tab_name)
+        deaths_explosive = self._get_value(user_data, 'deaths_explosive', tab_name)
+        sheep_thrown = self._get_value(user_data, 'sheep_thrown', tab_name)
+        kills_bow = self._get_value(user_data, 'kills_bow', tab_name)
+        deaths_bow = self._get_value(user_data, 'deaths_bow', tab_name)
+        kills_melee = self._get_value(user_data, 'kills_melee', tab_name)
+        deaths_melee = self._get_value(user_data, 'deaths_melee', tab_name)
+
+        # Derived values
+        playtime_hours = playtime_seconds / 3600 if playtime_seconds else 0
+        exp_per_hour = safe_div(experience, playtime_hours)
+        exp_per_game = safe_div(experience, games)
+        wins_per_hour = safe_div(wins, playtime_hours)
+        kills_per_hour = safe_div(kills, playtime_hours)
+        kdr = safe_div(kills, deaths) if deaths else kills
+        wlr = safe_div(wins, losses) if losses else wins
+        kills_per_game = safe_div(kills, games)
+        kills_per_win = safe_div(kills, wins)
+        damage_per_game = safe_div(damage, games)
+        damage_per_sheep = safe_div(damage, sheep_thrown)
+        damage_per_kill = safe_div(damage, kills)
+        void_kdr = safe_div(kills_void, deaths_void) if deaths_void else kills_void
+        wools_per_game = safe_div(magic_wools, games)
+        explosive_kdr = safe_div(kills_explosive, deaths_explosive) if deaths_explosive else kills_explosive
+        sheeps_per_game = safe_div(sheep_thrown, games)
+        bow_kdr = safe_div(kills_bow, deaths_bow) if deaths_bow else kills_bow
+        melee_kdr = safe_div(kills_melee, deaths_melee) if deaths_melee else kills_melee
+        survival_rate = safe_div(games - deaths, games) if games else 0
+
+        return {
+            "playtime": format_playtime(int(playtime_seconds)) if playtime_seconds else "0s",
+            "exp_per_hour": fmt_ratio(exp_per_hour),
+            "exp_per_game": fmt_ratio(exp_per_game),
+            "wins_per_hour": fmt_ratio(wins_per_hour),
+            "kills_per_hour": fmt_ratio(kills_per_hour),
+            "wins": fmt_int(wins),
+            "losses": fmt_int(losses),
+            "wlr": fmt_ratio(wlr),
+            "layers": fmt_int(layers),
+            "coins": fmt_int(coins),
+            "kills": fmt_int(kills),
+            "deaths": fmt_int(deaths),
+            "kdr": fmt_ratio(kdr),
+            "kills_per_game": fmt_ratio(kills_per_game),
+            "kills_per_win": fmt_ratio(kills_per_win),
+            "damage": fmt_int(damage),
+            "damage_per_game": fmt_ratio(damage_per_game),
+            "damage_per_kill": fmt_ratio(damage_per_kill),
+            "damage_per_sheep": fmt_ratio(damage_per_sheep),
+            "void_kills": fmt_int(kills_void),
+            "void_deaths": fmt_int(deaths_void),
+            "void_kdr": fmt_ratio(void_kdr),
+            "magic_wools": fmt_int(magic_wools),
+            "wools_per_game": fmt_ratio(wools_per_game),
+            "explosive_kills": fmt_int(kills_explosive),
+            "explosive_deaths": fmt_int(deaths_explosive),
+            "explosive_kdr": fmt_ratio(explosive_kdr),
+            "sheeps_thrown": fmt_int(sheep_thrown),
+            "sheeps_per_game": fmt_ratio(sheeps_per_game),
+            "bow_kills": fmt_int(kills_bow),
+            "bow_deaths": fmt_int(deaths_bow),
+            "bow_kdr": fmt_ratio(bow_kdr),
+            "games_played": fmt_int(games),
+            "melee_kills": fmt_int(kills_melee),
+            "melee_deaths": fmt_int(deaths_melee),
+            "melee_kdr": fmt_ratio(melee_kdr),
+            "survival_rate": fmt_ratio(survival_rate),
+        }
+
+    def update_buttons(self):
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.style = discord.ButtonStyle.primary if child.custom_id == self.current_tab else discord.ButtonStyle.secondary
+
+    def generate_compare_image(self, tab_name: str):
+        stats1 = self._collect_stats(self.user_data1, tab_name)
+        stats2 = self._collect_stats(self.user_data2, tab_name)
+        
+        if Image is not None:
+            try:
+                img_io = create_compare_stats_image(
+                    self.ign1, self.ign2, tab_name,
+                    stats1, stats2,
+                    self.meta1.get("level", 0), self.meta2.get("level", 0),
+                    self.meta1.get("icon", ""), self.meta2.get("icon", ""),
+                    self.ign_color1, self.ign_color2,
+                    self.guild_tag1, self.guild_tag2,
+                    self.guild_color1, self.guild_color2
+                )
+                filename = f"{self.ign1}_vs_{self.ign2}_{tab_name}_compare.png"
+                return None, discord.File(img_io, filename=filename)
+            except Exception as e:
+                print(f"[WARNING] Compare stats image generation failed: {e}")
+        
+        # Fallback to embed
+        embed = discord.Embed(title=f"{self.ign1} vs {self.ign2} - {tab_name.title()} Comparison")
+        embed.add_field(name=f"{self.ign1} Wins", value=f"```{stats1['wins']}```", inline=True)
+        embed.add_field(name=f"{self.ign2} Wins", value=f"```{stats2['wins']}```", inline=True)
+        embed.add_field(name="", value="", inline=True)
+        return embed, None
+
+    @discord.ui.button(label="All-time", custom_id="all-time", style=discord.ButtonStyle.primary)
+    async def compare_all_time_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_tab = "all-time"
+        self.update_buttons()
+        embed, file = self.generate_compare_image(self.current_tab)
+        if file:
+            await interaction.response.edit_message(view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Session", custom_id="session", style=discord.ButtonStyle.secondary)
+    async def compare_session_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_tab = "session"
+        self.update_buttons()
+        embed, file = self.generate_compare_image(self.current_tab)
+        if file:
+            await interaction.response.edit_message(view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Daily", custom_id="daily", style=discord.ButtonStyle.secondary)
+    async def compare_daily_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_tab = "daily"
+        self.update_buttons()
+        embed, file = self.generate_compare_image(self.current_tab)
+        if file:
+            await interaction.response.edit_message(view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Yesterday", custom_id="yesterday", style=discord.ButtonStyle.secondary)
+    async def compare_yesterday_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_tab = "yesterday"
+        self.update_buttons()
+        embed, file = self.generate_compare_image(self.current_tab)
+        if file:
+            await interaction.response.edit_message(view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Monthly", custom_id="monthly", style=discord.ButtonStyle.secondary)
+    async def compare_monthly_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_tab = "monthly"
+        self.update_buttons()
+        embed, file = self.generate_compare_image(self.current_tab)
         if file:
             await interaction.response.edit_message(view=self, attachments=[file])
         else:
@@ -3658,7 +4076,12 @@ def _calculate_ratio_value_from_excel(stats_dict: dict, period: str, metric: str
             sheep = stats_dict.get("sheep_thrown", {}).get(period, 0)
             games = stats_dict.get("games_pulled", {}).get(period, 0)
             return round(sheep / games, 2) if games > 0 else 0
-    except:
+        elif metric == "survival_rate":
+            games = stats_dict.get("games_played", {}).get(period, 0)
+            deaths = stats_dict.get("deaths", {}).get(period, 0)
+            return round((games - deaths) / games, 2) if games > 0 else 0
+    except Exception as e:
+        print(f"[ERROR] Exception in _calculate_ratio_value_from_excel for metric {metric}: {e}")
         return None
     return None
 
@@ -3711,7 +4134,8 @@ def _load_ratio_leaderboard_data_from_excel(metric: str):
                 # Process each period
                 for period in periods:
                     val = _calculate_ratio_value_from_excel(stats_dict, period, metric)
-                    if val is not None:
+                    # For survival_rate, only add if val is positive (0 means no games played)
+                    if val is not None and not (metric == "survival_rate" and val <= 0):
                         result[period].append((
                             username, float(val), val, level, icon, ign_color, guild_tag, guild_color
                         ))
@@ -3797,6 +4221,10 @@ def _calculate_ratio_value_from_cache(stats, period, metric):
             sheep = stats.get("sheep_thrown", {}).get(period, 0)
             games = stats.get("games_played", {}).get(period, 0)
             return round(sheep / games, 2) if games > 0 else 0
+        elif metric == "survival_rate":
+            games = stats.get("games_played", {}).get(period, 0)
+            deaths = stats.get("deaths", {}).get(period, 0)
+            return round((games - deaths) / games, 2) if games > 0 else 0
     except:
         return None
     return None
@@ -3857,6 +4285,7 @@ class RatioLeaderboardView(discord.ui.View):
             "wins_per_hour": "Wins/Hour",
             "exp_per_hour": "EXP/Hour",
             "exp_per_game": "EXP/Game",
+            "survival_rate": "Survival Rate",
         }
         
         # Period selector dropdown
@@ -5287,6 +5716,130 @@ async def streak(interaction: discord.Interaction, ign: str = None):
         await interaction.followup.send(f"[ERROR] {str(e)}")
 
 
+@bot.tree.command(name="compare", description="Compare stats between two players")
+@discord.app_commands.describe(
+    ign1="First Minecraft IGN",
+    ign2="Second Minecraft IGN"
+)
+async def compare(interaction: discord.Interaction, ign1: str, ign2: str):
+    print(f"[DEBUG] /compare triggered for IGN1: {ign1}, IGN2: {ign2} by user: {interaction.user.name} in guild: {interaction.guild.name if interaction.guild else 'DM'}")
+    
+    # Validate both usernames
+    ok1, proper_ign1 = validate_and_normalize_ign(ign1)
+    if not ok1:
+        await interaction.response.send_message(f"The username {ign1} is invalid.", ephemeral=True)
+        return
+    ign1 = proper_ign1
+    
+    ok2, proper_ign2 = validate_and_normalize_ign(ign2)
+    if not ok2:
+        await interaction.response.send_message(f"The username {ign2} is invalid.", ephemeral=True)
+        return
+    ign2 = proper_ign2
+    
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except (discord.errors.NotFound, discord.errors.HTTPException) as e:
+            print(f"[DEBUG] Defer failed for {ign1} vs {ign2} in /compare: {e}")
+            return
+
+    try:
+        # Use cached data for fast comparison
+        cache_data = await STATS_CACHE.get_data()
+        
+        # Find users in cache case-insensitively
+        key1 = ign1.casefold()
+        user_data1 = None
+        actual_ign1 = ign1
+        for name, data in cache_data.items():
+            if name.casefold() == key1:
+                user_data1 = data
+                actual_ign1 = name
+                break
+        
+        key2 = ign2.casefold()
+        user_data2 = None
+        actual_ign2 = ign2
+        for name, data in cache_data.items():
+            if name.casefold() == key2:
+                user_data2 = data
+                actual_ign2 = name
+                break
+        
+        # If either player not in cache, try to fetch them
+        if not user_data1:
+            print(f"[DEBUG] {ign1} not in cache, fetching...")
+            cached1, actual_ign1 = await ensure_user_cached(ign1)
+            if not cached1:
+                await interaction.followup.send(f"[ERROR] Could not find or fetch data for {ign1}")
+                return
+            # Reload cache after fetch
+            cache_data = await STATS_CACHE.get_data()
+            for name, data in cache_data.items():
+                if name.casefold() == actual_ign1.casefold():
+                    user_data1 = data
+                    break
+        
+        if not user_data2:
+            print(f"[DEBUG] {ign2} not in cache, fetching...")
+            cached2, actual_ign2 = await ensure_user_cached(ign2)
+            if not cached2:
+                await interaction.followup.send(f"[ERROR] Could not find or fetch data for {ign2}")
+                return
+            # Reload cache after fetch
+            cache_data = await STATS_CACHE.get_data()
+            for name, data in cache_data.items():
+                if name.casefold() == actual_ign2.casefold():
+                    user_data2 = data
+                    break
+        
+        if not user_data1:
+            await interaction.followup.send(f"[ERROR] Player sheet '{ign1}' not found")
+            return
+        
+        if not user_data2:
+            await interaction.followup.send(f"[ERROR] Player sheet '{ign2}' not found")
+            return
+
+        tracked_users = load_tracked_users()
+        is_tracked1 = any(u.casefold() == actual_ign1.casefold() for u in tracked_users)
+        is_tracked2 = any(u.casefold() == actual_ign2.casefold() for u in tracked_users)
+
+        view = CompareView(user_data1, user_data2, actual_ign1, actual_ign2)
+        embed, file = view.generate_compare_image("all-time")
+
+        warning_msg = ""
+        if not is_tracked1 and not is_tracked2:
+            warning_msg = f"{actual_ign1} and {actual_ign2} are not currently tracked. Only all-time stats are available.\nUse `/track` to start tracking and enable session/daily/monthly stats."
+        elif not is_tracked1:
+            warning_msg = f"{actual_ign1} is not currently tracked. Only all-time stats are available for them.\nUse `/track ign:{actual_ign1}` to start tracking."
+        elif not is_tracked2:
+            warning_msg = f"{actual_ign2} is not currently tracked. Only all-time stats are available for them.\nUse `/track ign:{actual_ign2}` to start tracking."
+
+        if file:
+            if warning_msg:
+                await interaction.followup.send(content=warning_msg, file=file, view=view)
+            else:
+                await interaction.followup.send(view=view, file=file)
+        else:
+            if warning_msg:
+                await interaction.followup.send(content=warning_msg, embed=embed, view=view)
+            else:
+                await interaction.followup.send(embed=embed, view=view)
+
+        # Schedule cleanup for untracked users
+        if not is_tracked1:
+            bot.loop.create_task(cleanup_untracked_user_delayed(actual_ign1, delay_seconds=60))
+        if not is_tracked2:
+            bot.loop.create_task(cleanup_untracked_user_delayed(actual_ign2, delay_seconds=60))
+
+    except subprocess.TimeoutExpired:
+        await interaction.followup.send("[ERROR] Command timed out (30s limit)")
+    except Exception as e:
+        await interaction.followup.send(f"[ERROR] {str(e)}")
+
+
 @bot.tree.command(name="killdistribution", description="View kill-type distribution as a pie chart")
 @discord.app_commands.describe(ign="Minecraft IGN (optional if you set /default)")
 async def killdistribution(interaction: discord.Interaction, ign: str = None):
@@ -5691,6 +6244,7 @@ async def death_leaderboard(interaction: discord.Interaction, metric: discord.ap
     discord.app_commands.Choice(name="Wins/Hour", value="wins_per_hour"),
     discord.app_commands.Choice(name="EXP/Hour", value="exp_per_hour"),
     discord.app_commands.Choice(name="EXP/Game", value="exp_per_game"),
+    discord.app_commands.Choice(name="Survival Rate", value="survival_rate"),
 ])
 async def ratio_leaderboard(interaction: discord.Interaction, metric: discord.app_commands.Choice[str]):
     if not interaction.response.is_done():
