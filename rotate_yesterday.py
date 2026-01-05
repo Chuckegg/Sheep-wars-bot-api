@@ -31,7 +31,7 @@ def rotate_yesterday():
     success_count = sum(1 for success in results.values() if success)
     
     for username, success in results.items():
-        status = "[OK]" if success else "[ERROR]"
+        status = "[OK]" if success else "[SKIP]"
         print(f"{status} {username}")
     
     print(f"\n[SUMMARY] Rotated daily->yesterday for {success_count}/{len(users)} users")

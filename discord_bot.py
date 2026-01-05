@@ -1519,8 +1519,8 @@ def create_compare_stats_image(ign1: str, ign2: str, tab_name: str, stats1: dict
     draw_tab.text(((title_width - tab_text_w) // 2, 5), tab_text, font=font_tab, fill=(255, 255, 255))
 
     # Stats layout - stat name in magenta, then ign1 value (blue), then ign2 value (red)
-    box_width = 200
-    box_height = 80
+    box_width = 230
+    box_height = 100
     spacing = 10
     
     # Colors
@@ -1554,25 +1554,23 @@ def create_compare_stats_image(ign1: str, ign2: str, tab_name: str, stats1: dict
                 draw.rounded_rectangle([0, 0, box_width-1, box_height-1], radius=15, fill=card_bg)
                 
                 # Font sizes
-                font_label = _load_font("DejaVuSans-Bold.ttf", 13)
-                font_value = _load_font("DejaVuSans-Bold.ttf", 18)
+                font_label = _load_font("DejaVuSans-Bold.ttf", 14)
+                font_value = _load_font("DejaVuSans-Bold.ttf", 20)
                 
-                # Calculate vertical spacing for 3 lines
-                line_height = box_height / 3
-                
-                # Draw label in white (top third)
+                # Draw label (Top)
                 l_text = f"{label.upper()}"
-                l_bbox = draw.textbbox((0, 0), l_text, font=font_label)
-                l_w = l_bbox[2] - l_bbox[0]
-                draw.text(((box_width - l_w) // 2, int(line_height * 0.5) - 9), l_text, font=font_label, fill=(255, 255, 255))
+                draw.text((box_width // 2, 20), l_text, font=font_label, fill=(200, 200, 200), anchor="mm")
                 
-                # Draw ign1 value in blue (middle third)
+                # Draw separator line
+                draw.line([(box_width // 2, 40), (box_width // 2, box_height - 15)], fill=(60, 60, 70), width=2)
+                
+                # Draw ign1 value (Left)
                 v1_text = str(value1)
-                draw.text((box_width // 2, int(line_height * 1.5)), v1_text, font=font_value, fill=blue, anchor="mm")
+                draw.text((box_width // 4, 65), v1_text, font=font_value, fill=blue, anchor="mm")
                 
-                # Draw ign2 value in red (bottom third)
+                # Draw ign2 value (Right)
                 v2_text = str(value2)
-                draw.text((box_width // 2, int(line_height * 2.5)), v2_text, font=font_value, fill=red, anchor="mm")
+                draw.text((3 * box_width // 4, 65), v2_text, font=font_value, fill=red, anchor="mm")
                 
                 rendered.append(img)
             except Exception as e:
