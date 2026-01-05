@@ -149,7 +149,7 @@ def get_user_stats(username: str) -> Dict[str, Dict[str, float]]:
         cursor.execute('''
             SELECT stat_name, lifetime, session, daily, yesterday, monthly
             FROM user_stats
-            WHERE username = ?
+            WHERE LOWER(username) = LOWER(?)
         ''', (username,))
         
         stats = {}
@@ -299,7 +299,7 @@ def get_user_stats_with_deltas(username: str) -> Dict[str, Dict[str, float]]:
         cursor.execute('''
             SELECT stat_name, lifetime, session, daily, yesterday, monthly
             FROM user_stats
-            WHERE username = ?
+            WHERE LOWER(username) = LOWER(?)
         ''', (username,))
         
         stats = {}
@@ -409,10 +409,13 @@ def rotate_daily_to_yesterday(usernames: List[str]) -> Dict[str, bool]:
                 cursor.execute('''
                     UPDATE user_stats
                     SET yesterday = daily
-                    WHERE username = ?
+                    WHERE LOWER(username) = LOWER(?)
                 ''', (username,))
                 
-                results[username] = True
+                if cursor.rowcount > 0:
+                    results[username] = True
+                else:
+                    results[username] = False
             except Exception as e:
                 print(f"[ERROR] Failed to rotate {username}: {e}")
                 results[username] = False
