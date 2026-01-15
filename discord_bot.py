@@ -11,6 +11,7 @@ from db_helper import (
     init_database,
     get_all_usernames,
     get_database_stats,
+    get_user_stats,
     get_user_stats_with_deltas,
     get_user_meta,
     get_all_user_meta,
@@ -29,7 +30,9 @@ from db_helper import (
     remove_tracked_user,
     is_tracked_user,
     get_tracked_users,
-    set_tracked_users
+    set_tracked_users,
+    get_db_connection,
+    delete_user
 )
 import re
 import shutil
@@ -680,7 +683,7 @@ MINECRAFT_CODE_TO_HEX = {
     'a': '#55FF55',
     'b': '#55FFFF',
     'c': '#FF5555',
-    'd': '#FF55FF',
+    'd': '#FFD3F5',
     'e': '#FFFF55',
     'f': '#FFFFFF',
 }
@@ -1132,11 +1135,11 @@ def render_stat_box(label: str, value: str, width: int = 200, height: int = 80):
     
     # Row 1 colors
     if "wins/hour" in l or "kills/hour" in l:
-        color = (170, 85, 255)  # Purple
+        color = (140, 100, 200)  # Softer purple
     elif "playtime" in l:
         color = (255, 85, 255)  # Magenta
     elif "exp/hour" in l or "exp/game" in l:
-        color = (85, 255, 255)  # Cyan
+        color = (100, 200, 200)  # Muted cyan
     # Row 2+ colors - specific order matters
     elif l == "wins" or l == "kills" or l == "void kills" or l == "explosive kills" or l == "bow kills" or l == "melee kills":
         color = (85, 255, 85)  # Green
@@ -1456,6 +1459,106 @@ def create_streaks_image(ign: str, level: int, icon: str, ign_color: str, guild_
     return out
 
 
+def calculate_stat_winners(stats1: dict, stats2: dict) -> tuple:
+    """Calculate winners for important and non-important stats.
+    
+    Returns:
+        tuple: (important_wins1, important_wins2, nonimportant_wins1, nonimportant_wins2)
+    """
+    # Important stats: KDR, WLR, survival rate, and all types of KDR
+    # Lower is better for losses and death stats
+    important_stats = [
+        ('kdr', False),           # Higher is better
+        ('wlr', False),           # Higher is better
+        ('survival_rate', False), # Higher is better
+        ('void_kdr', False),      # Higher is better
+        ('explosive_kdr', False), # Higher is better
+        ('bow_kdr', False),       # Higher is better
+        ('melee_kdr', False),     # Higher is better
+    ]
+    
+    # Non-important stats: everything else
+    # Higher is better except for losses and deaths
+    nonimportant_stats = [
+        ('wins', False),
+        ('losses', True),          # Lower is better
+        ('kills', False),
+        ('deaths', True),          # Lower is better
+        ('void_kills', False),
+        ('void_deaths', True),     # Lower is better
+        ('explosive_kills', False),
+        ('explosive_deaths', True), # Lower is better
+        ('bow_kills', False),
+        ('bow_deaths', True),      # Lower is better
+        ('melee_kills', False),
+        ('melee_deaths', True),    # Lower is better
+        ('damage', False),
+        ('magic_wools', False),
+        ('sheeps_thrown', False),
+        ('kills_per_game', False),
+        ('kills_per_win', False),
+        ('damage_per_game', False),
+        ('damage_per_sheep', False),
+        ('damage_per_kill', False),
+        ('wools_per_game', False),
+        ('sheeps_per_game', False),
+        ('exp_per_hour', False),
+        ('exp_per_game', False),
+        ('wins_per_hour', False),
+        ('kills_per_hour', False),
+        ('games_played', False),
+        ('layers', False),
+        ('coins', False),
+    ]
+    
+    def parse_value(val_str):
+        """Parse stat value from formatted string."""
+        try:
+            # Remove commas and convert to float
+            return float(str(val_str).replace(',', ''))
+        except (ValueError, AttributeError):
+            return 0.0
+    
+    def compare_stat(stat_key, lower_is_better, stats1, stats2):
+        """Compare a single stat between two players.
+        
+        Returns: 1 if player1 wins, 2 if player2 wins, 0 if tie
+        """
+        val1 = parse_value(stats1.get(stat_key, '0'))
+        val2 = parse_value(stats2.get(stat_key, '0'))
+        
+        if val1 == val2:
+            return 0
+        
+        if lower_is_better:
+            return 1 if val1 < val2 else 2
+        else:
+            return 1 if val1 > val2 else 2
+    
+    important_wins1 = 0
+    important_wins2 = 0
+    nonimportant_wins1 = 0
+    nonimportant_wins2 = 0
+    
+    # Calculate important stats
+    for stat_key, lower_is_better in important_stats:
+        winner = compare_stat(stat_key, lower_is_better, stats1, stats2)
+        if winner == 1:
+            important_wins1 += 1
+        elif winner == 2:
+            important_wins2 += 1
+    
+    # Calculate non-important stats
+    for stat_key, lower_is_better in nonimportant_stats:
+        winner = compare_stat(stat_key, lower_is_better, stats1, stats2)
+        if winner == 1:
+            nonimportant_wins1 += 1
+        elif winner == 2:
+            nonimportant_wins2 += 1
+    
+    return (important_wins1, important_wins2, nonimportant_wins1, nonimportant_wins2)
+
+
 def create_compare_stats_image(ign1: str, ign2: str, tab_name: str, stats1: dict, stats2: dict, 
                                 level1: int, level2: int, icon1: str, icon2: str,
                                 ign_color1: str = None, ign_color2: str = None,
@@ -1519,8 +1622,8 @@ def create_compare_stats_image(ign1: str, ign2: str, tab_name: str, stats1: dict
     draw_tab.text(((title_width - tab_text_w) // 2, 5), tab_text, font=font_tab, fill=(255, 255, 255))
 
     # Stats layout - stat name in magenta, then ign1 value (blue), then ign2 value (red)
-    box_width = 230
-    box_height = 100
+    box_width = 200
+    box_height = 80
     spacing = 10
     
     # Colors
@@ -1554,23 +1657,25 @@ def create_compare_stats_image(ign1: str, ign2: str, tab_name: str, stats1: dict
                 draw.rounded_rectangle([0, 0, box_width-1, box_height-1], radius=15, fill=card_bg)
                 
                 # Font sizes
-                font_label = _load_font("DejaVuSans-Bold.ttf", 14)
-                font_value = _load_font("DejaVuSans-Bold.ttf", 20)
+                font_label = _load_font("DejaVuSans-Bold.ttf", 13)
+                font_value = _load_font("DejaVuSans-Bold.ttf", 18)
                 
-                # Draw label (Top)
+                # Calculate vertical spacing for 3 lines
+                line_height = box_height / 3
+                
+                # Draw label in white (top third)
                 l_text = f"{label.upper()}"
-                draw.text((box_width // 2, 20), l_text, font=font_label, fill=(200, 200, 200), anchor="mm")
+                l_bbox = draw.textbbox((0, 0), l_text, font=font_label)
+                l_w = l_bbox[2] - l_bbox[0]
+                draw.text(((box_width - l_w) // 2, int(line_height * 0.5) - 9), l_text, font=font_label, fill=(255, 255, 255))
                 
-                # Draw separator line
-                draw.line([(box_width // 2, 40), (box_width // 2, box_height - 15)], fill=(60, 60, 70), width=2)
-                
-                # Draw ign1 value (Left)
+                # Draw ign1 value in blue (middle third)
                 v1_text = str(value1)
-                draw.text((box_width // 4, 65), v1_text, font=font_value, fill=blue, anchor="mm")
+                draw.text((box_width // 2, int(line_height * 1.5)), v1_text, font=font_value, fill=blue, anchor="mm")
                 
-                # Draw ign2 value (Right)
+                # Draw ign2 value in red (bottom third)
                 v2_text = str(value2)
-                draw.text((3 * box_width // 4, 65), v2_text, font=font_value, fill=red, anchor="mm")
+                draw.text((box_width // 2, int(line_height * 2.5)), v2_text, font=font_value, fill=red, anchor="mm")
                 
                 rendered.append(img)
             except Exception as e:
@@ -1612,7 +1717,8 @@ def create_compare_stats_image(ign1: str, ign2: str, tab_name: str, stats1: dict
     composite_width = grid_width + (margin_x * 2)
     title_x_offset = (composite_width - title_width) // 2
     bottom_padding = 40
-    composite_height = title_height + tab_label_height + spacing + grid_height + bottom_padding
+    winner_row_height = 100  # Height for winner row
+    composite_height = title_height + tab_label_height + spacing + grid_height + spacing + winner_row_height + bottom_padding
     
     composite = Image.new('RGBA', (composite_width, composite_height), (18, 18, 20, 255))
     composite.paste(title_composite, (title_x_offset, 0), title_composite if title_composite.mode == 'RGBA' else None)
@@ -1628,6 +1734,78 @@ def create_compare_stats_image(ign1: str, ign2: str, tab_name: str, stats1: dict
             composite.paste(box, (x, y_offset), box)
             x += box.width + spacing
         y_offset += line_heights[idx] + spacing
+    
+    # Calculate winners
+    imp_wins1, imp_wins2, nonimp_wins1, nonimp_wins2 = calculate_stat_winners(stats1, stats2)
+    
+    # Winner row - two boxes side by side
+    winner_box_width = (grid_width - spacing) // 2
+    winner_box_height = 100
+    winner_row_y = y_offset
+    
+    # Important stats box
+    imp_box = Image.new('RGBA', (winner_box_width, winner_box_height), (0, 0, 0, 0))
+    draw_imp = ImageDraw.Draw(imp_box)
+    draw_imp.rounded_rectangle([0, 0, winner_box_width-1, winner_box_height-1], radius=15, fill=(35, 30, 45, 240))
+    
+    font_winner_title = _load_font("DejaVuSans-Bold.ttf", 14)
+    font_winner_score = _load_font("DejaVuSans-Bold.ttf", 20)
+    font_winner_text = _load_font("DejaVuSans-Bold.ttf", 16)
+    
+    # Important stats title
+    imp_title = "IMPORTANT STATS"
+    imp_title_bbox = draw_imp.textbbox((0, 0), imp_title, font=font_winner_title)
+    imp_title_w = imp_title_bbox[2] - imp_title_bbox[0]
+    draw_imp.text(((winner_box_width - imp_title_w) // 2, 10), imp_title, font=font_winner_title, fill=(255, 255, 255))
+    
+    # Score
+    imp_score_text = f"{imp_wins1} - {imp_wins2}"
+    draw_imp.text((winner_box_width // 2, 40), imp_score_text, font=font_winner_score, fill=(255, 255, 255), anchor="mm")
+    
+    # Winner
+    if imp_wins1 > imp_wins2:
+        imp_winner_text = f"Winner: {ign1}"
+        imp_winner_color = blue
+    elif imp_wins2 > imp_wins1:
+        imp_winner_text = f"Winner: {ign2}"
+        imp_winner_color = red
+    else:
+        imp_winner_text = "Winner: Tie"
+        imp_winner_color = (200, 200, 200)
+    
+    draw_imp.text((winner_box_width // 2, 70), imp_winner_text, font=font_winner_text, fill=imp_winner_color, anchor="mm")
+    
+    # Non-important stats box
+    nonimp_box = Image.new('RGBA', (winner_box_width, winner_box_height), (0, 0, 0, 0))
+    draw_nonimp = ImageDraw.Draw(nonimp_box)
+    draw_nonimp.rounded_rectangle([0, 0, winner_box_width-1, winner_box_height-1], radius=15, fill=(35, 30, 45, 240))
+    
+    # Non-important stats title
+    nonimp_title = "NON-IMPORTANT STATS"
+    nonimp_title_bbox = draw_nonimp.textbbox((0, 0), nonimp_title, font=font_winner_title)
+    nonimp_title_w = nonimp_title_bbox[2] - nonimp_title_bbox[0]
+    draw_nonimp.text(((winner_box_width - nonimp_title_w) // 2, 10), nonimp_title, font=font_winner_title, fill=(255, 255, 255))
+    
+    # Score
+    nonimp_score_text = f"{nonimp_wins1} - {nonimp_wins2}"
+    draw_nonimp.text((winner_box_width // 2, 40), nonimp_score_text, font=font_winner_score, fill=(255, 255, 255), anchor="mm")
+    
+    # Winner
+    if nonimp_wins1 > nonimp_wins2:
+        nonimp_winner_text = f"Winner: {ign1}"
+        nonimp_winner_color = blue
+    elif nonimp_wins2 > nonimp_wins1:
+        nonimp_winner_text = f"Winner: {ign2}"
+        nonimp_winner_color = red
+    else:
+        nonimp_winner_text = "Winner: Tie"
+        nonimp_winner_color = (200, 200, 200)
+    
+    draw_nonimp.text((winner_box_width // 2, 70), nonimp_winner_text, font=font_winner_text, fill=nonimp_winner_color, anchor="mm")
+    
+    # Paste winner boxes
+    composite.paste(imp_box, (margin_x, winner_row_y), imp_box)
+    composite.paste(nonimp_box, (margin_x + winner_box_width + spacing, winner_row_y), nonimp_box)
     
     # Footer
     draw = ImageDraw.Draw(composite)
@@ -1729,7 +1907,7 @@ def create_leaderboard_image(tab_name: str, metric_label: str, leaderboard_data:
         # Value
         if is_playtime:
             val_str = format_playtime(int(value))
-        elif "Ratio" in metric_label or "/" in metric_label or "Per" in metric_label or "Rate" in metric_label:
+        elif "Ratio" in metric_label or "/" in metric_label or "Per" in metric_label or "Rate" in metric_label or "Score" in metric_label:
             val_str = f"{float(value):,.2f}"
         else:
             val_str = f"{int(value):,}"
@@ -2199,10 +2377,10 @@ def load_user_colors() -> dict:
                 'icon': meta.get('icon'),
                 'rank': meta.get('rank'),
             }
-        print(f"[DEBUG] Loaded colors/meta for {len(result)} users")
+        # print(f"[DEBUG] Loaded colors/meta for {len(result)} users")
         if result:
             sample_user = next(iter(result))
-            print(f"[DEBUG] Sample meta for {sample_user}: {result[sample_user]}")
+            # print(f"[DEBUG] Sample meta for {sample_user}: {result[sample_user]}")
         return result
     except Exception as e:
         print(f"[ERROR] Failed to load user colors: {e}")
@@ -2995,6 +3173,22 @@ async def scheduler_loop():
                         print(f"[SCHEDULER] Full stderr:\n{yesterday_result.stderr}")
                         await send_fetch_message(f"Warning: Yesterday snapshot failed at {now.strftime('%I:%M %p')}\nError: {error_detail[:500]}")
                     
+                    # Step 1.5: Run weekly reset on Mondays (weekday() returns 0 for Monday)
+                    if now.weekday() == 0:
+                        print(f"[SCHEDULER] Running weekly reset (Monday)")
+                        def run_weekly():
+                            return run_script_batch("batch_update.py", ["-schedule", "weekly"])
+                        
+                        weekly_result = await asyncio.to_thread(run_weekly)
+                        if weekly_result.returncode != 0:
+                            error_detail = weekly_result.stderr or weekly_result.stdout or "Unknown error"
+                            print(f"[SCHEDULER] Weekly reset FAILED - returncode: {weekly_result.returncode}")
+                            print(f"[SCHEDULER] Full stdout:\n{weekly_result.stdout}")
+                            print(f"[SCHEDULER] Full stderr:\n{weekly_result.stderr}")
+                            await send_fetch_message(f"Warning: Weekly reset failed at {now.strftime('%I:%M %p')}\nError: {error_detail[:500]}")
+                        else:
+                            print(f"[SCHEDULER] Weekly reset completed successfully")
+                    
                     # Step 2: Determine which snapshots to take
                     # Daily: always
                     # Monthly: only on 1st of month
@@ -3012,6 +3206,8 @@ async def scheduler_loop():
                         msg = f"Daily snapshot completed at {now.strftime('%I:%M %p')}"
                         if now.day == 1:
                             msg += " (including monthly snapshots)"
+                        if now.weekday() == 0:
+                            msg += " + Weekly reset"
                         await send_fetch_message(msg)
                     else:
                         error_msg = result.stderr or result.stdout or "Unknown error"
@@ -3110,6 +3306,10 @@ class StatsTabView(discord.ui.View):
     @discord.ui.button(label="Yesterday", custom_id="yesterday")
     async def yesterday(self, interaction, button):
         await self.handle_tab_click(interaction, "yesterday")
+
+    @discord.ui.button(label="Weekly", custom_id="weekly")
+    async def weekly(self, interaction, button):
+        await self.handle_tab_click(interaction, "weekly")
 
     @discord.ui.button(label="Monthly", custom_id="monthly")
     async def monthly(self, interaction, button):
@@ -3309,6 +3509,16 @@ class StatsFullView(discord.ui.View):
     @discord.ui.button(label="Yesterday", custom_id="yesterday", style=discord.ButtonStyle.secondary)
     async def full_yesterday_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.current_tab = "yesterday"
+        self.update_buttons()
+        embed, file = self.generate_full_image(self.current_tab)
+        if file:
+            await interaction.response.edit_message(view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Weekly", custom_id="weekly", style=discord.ButtonStyle.secondary)
+    async def full_weekly_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_tab = "weekly"
         self.update_buttons()
         embed, file = self.generate_full_image(self.current_tab)
         if file:
@@ -3541,6 +3751,16 @@ class CompareView(discord.ui.View):
         else:
             await interaction.response.edit_message(embed=embed, view=self)
 
+    @discord.ui.button(label="Weekly", custom_id="weekly", style=discord.ButtonStyle.secondary)
+    async def compare_weekly_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_tab = "weekly"
+        self.update_buttons()
+        embed, file = self.generate_compare_image(self.current_tab)
+        if file:
+            await interaction.response.edit_message(view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+
     @discord.ui.button(label="Monthly", custom_id="monthly", style=discord.ButtonStyle.secondary)
     async def compare_monthly_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.current_tab = "monthly"
@@ -3678,6 +3898,16 @@ class DistributionView(discord.ui.View):
         else:
             await interaction.response.edit_message(embed=embed, view=self, attachments=[])
 
+    @discord.ui.button(label="Weekly", custom_id="dist-weekly", style=discord.ButtonStyle.secondary)
+    async def dist_weekly_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_tab = "weekly"
+        self.update_buttons()
+        embed, file = self.generate_distribution(self.current_tab)
+        if file:
+            await interaction.response.edit_message(embed=None, view=self, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, view=self, attachments=[])
+
     @discord.ui.button(label="Monthly", custom_id="dist-monthly", style=discord.ButtonStyle.secondary)
     async def dist_monthly_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.current_tab = "monthly"
@@ -3689,14 +3919,377 @@ class DistributionView(discord.ui.View):
             await interaction.response.edit_message(embed=embed, view=self, attachments=[])
 
 
+# ==============================
+# RATIOS MILESTONE PREDICTION
+# ==============================
+
+def calculate_next_milestone(current_value: float) -> int:
+    """Calculate the next round number milestone for a ratio.
+    
+    For example:
+    - 3.30 -> 4
+    - 4.00 -> 5
+    - 0.85 -> 1
+    - 10.5 -> 11
+    """
+    return math.ceil(current_value)
+
+
+def calculate_wins_needed_for_wlr(current_wins: int, current_losses: int, target_wlr: float) -> int:
+    """Calculate how many additional wins are needed to reach a target WLR.
+    
+    Formula: target_wlr = (current_wins + x) / current_losses
+    Solving for x: x = (target_wlr * current_losses) - current_wins
+    """
+    if current_losses == 0:
+        return 0  # Already at infinity WLR
+    
+    wins_needed = (target_wlr * current_losses) - current_wins
+    return max(0, math.ceil(wins_needed))
+
+
+def calculate_kills_needed_for_kdr(current_kills: int, current_deaths: int, target_kdr: float) -> int:
+    """Calculate how many additional kills are needed to reach a target KDR.
+    
+    Formula: target_kdr = (current_kills + x) / current_deaths
+    Solving for x: x = (target_kdr * current_deaths) - current_kills
+    """
+    if current_deaths == 0:
+        return 0  # Already at infinity KDR
+    
+    kills_needed = (target_kdr * current_deaths) - current_kills
+    return max(0, math.ceil(kills_needed))
+
+
+def format_time_estimate(remaining: int, rate_per_hour: float) -> str:
+    """Format time estimation based on remaining items and rate per hour.
+    
+    Args:
+        remaining: Number of items remaining (wins or kills)
+        rate_per_hour: Rate per hour (wins/hour or kills/hour)
+    
+    Returns:
+        Formatted string like "5h 30m", "2d 3h", "Never" (if rate is 0), or "Complete" (if remaining is 0)
+    """
+    if remaining <= 0:
+        return "Complete"
+    
+    if rate_per_hour <= 0:
+        return "Never"
+    
+    hours_needed = remaining / rate_per_hour
+    
+    if hours_needed < 1:
+        minutes = int(hours_needed * 60)
+        return f"{minutes}m"
+    elif hours_needed < 24:
+        hours = int(hours_needed)
+        minutes = int((hours_needed - hours) * 60)
+        if minutes > 0:
+            return f"{hours}h {minutes}m"
+        return f"{hours}h"
+    else:
+        days = int(hours_needed / 24)
+        remaining_hours = int(hours_needed % 24)
+        if remaining_hours > 0:
+            return f"{days}d {remaining_hours}h"
+        return f"{days}d"
+
+
+def create_ratios_image(ign: str, level: int, icon: str, tab_name: str, 
+                        milestone_wlr: int, wins_remaining: int, wins_per_hour: float, wlr_estimate: str,
+                        milestone_kdr: int, kills_remaining: int, kills_per_hour: float, kdr_estimate: str,
+                        ign_color: str = None, guild_tag: str = None, guild_hex: str = None) -> io.BytesIO:
+    """Create an image showing milestone predictions for WLR and KDR."""
+    
+    if Image is None:
+        raise RuntimeError("Pillow not available")
+    
+    # Canvas dimensions
+    canvas_w, canvas_h = 950, 340
+    margin = 35
+    composite = Image.new('RGBA', (canvas_w, canvas_h), (18, 18, 20, 255))
+    draw = ImageDraw.Draw(composite)
+    
+    # Render prestige and username - CENTERED
+    ign_rgb = (85, 255, 255)
+    if ign_color:
+        try:
+            ign_rgb = tuple(int(str(ign_color).lstrip('#')[j:j+2], 16) for j in (0, 2, 4))
+        except:
+            pass
+    
+    # Get guild color
+    g_rgb = (170, 170, 170)
+    if guild_tag and guild_hex:
+        if str(guild_hex).upper() in MINECRAFT_NAME_TO_HEX:
+            guild_hex = MINECRAFT_NAME_TO_HEX[str(guild_hex).upper()]
+        try:
+            g_rgb = tuple(int(str(guild_hex).lstrip('#')[j:j+2], 16) for j in (0, 2, 4))
+        except:
+            pass
+    
+    # Get prestige segments and render
+    segs = get_prestige_segments(level, icon)
+    font_title = _load_font("DejaVuSans-Bold.ttf", 24)
+    
+    # Render prestige
+    txt_io = _render_text_segments_to_image(segs, font=font_title, padding=(0, 0))
+    prestige_img = Image.open(txt_io).convert("RGBA")
+    
+    # Calculate total width for centering
+    temp_draw = ImageDraw.Draw(Image.new('RGBA', (1, 1)))
+    username_text = f" {ign}"
+    username_bbox = temp_draw.textbbox((0, 0), username_text, font=font_title)
+    username_width = username_bbox[2] - username_bbox[0]
+    
+    guild_width = 0
+    if guild_tag:
+        safe_tag = _safe_guild_tag(guild_tag)
+        guild_text = f" [{safe_tag}]"
+        guild_bbox = temp_draw.textbbox((0, 0), guild_text, font=font_title)
+        guild_width = guild_bbox[2] - guild_bbox[0]
+    
+    total_width = prestige_img.width + username_width + guild_width
+    
+    # Start position for centered title
+    title_y = 25
+    x_pos = (canvas_w - total_width) // 2
+    
+    # Paste prestige
+    composite.paste(prestige_img, (x_pos, title_y), prestige_img)
+    x_pos += prestige_img.width
+    
+    # Draw username
+    draw.text((x_pos, title_y + prestige_img.height // 2), username_text, 
+              font=font_title, fill=ign_rgb, anchor="lm")
+    x_pos += username_width
+    
+    # Draw guild tag if present
+    if guild_tag:
+        draw.text((x_pos, title_y + prestige_img.height // 2), guild_text, 
+                  font=font_title, fill=g_rgb, anchor="lm")
+    
+    # Subtitle (tab name)
+    font_subtitle = _load_font("DejaVuSans.ttf", 16)
+    subtitle_text = f"Milestone Predictions - {tab_name.title()}"
+    subtitle_bbox = draw.textbbox((0, 0), subtitle_text, font=font_subtitle)
+    subtitle_w = subtitle_bbox[2] - subtitle_bbox[0]
+    draw.text(((canvas_w - subtitle_w) // 2, title_y + 38), subtitle_text, 
+              font=font_subtitle, fill=(180, 180, 200))
+    
+    # Separator line
+    line_y = title_y + 70
+    draw.line([margin, line_y, canvas_w - margin, line_y], fill=(60, 60, 80), width=2)
+    
+    # Table headers
+    table_y = line_y + 25
+    col_widths = [190, 165, 270, 200]
+    col_spacing = 20
+    col_x = [
+        margin,
+        margin + col_widths[0] + col_spacing,
+        margin + col_widths[0] + col_widths[1] + col_spacing * 2,
+        margin + col_widths[0] + col_widths[1] + col_widths[2] + col_spacing * 3
+    ]
+    
+    font_header = _load_font("DejaVuSans-Bold.ttf", 15)
+    headers = ["Milestone", "Missing", "Current Rate", "Estimation"]
+    
+    for i, (x, header) in enumerate(zip(col_x, headers)):
+        draw.text((x, table_y), header, font=font_header, fill=(255, 255, 255))
+    
+    # Header underline
+    draw.line([margin, table_y + 26, canvas_w - margin, table_y + 26], fill=(80, 80, 100), width=1)
+    
+    # Table rows
+    row_height = 52
+    font_value = _load_font("DejaVuSans.ttf", 16)
+    font_label = _load_font("DejaVuSans-Bold.ttf", 16)
+    
+    # Row 1: WLR
+    row_y = table_y + 42
+    wlr_color = (85, 255, 85)
+    draw.text((col_x[0], row_y), f"{milestone_wlr}.00 WLR", font=font_label, fill=wlr_color)
+    draw.text((col_x[1], row_y), f"{wins_remaining:,} Wins", font=font_value, fill=(255, 255, 255))
+    draw.text((col_x[2], row_y), f"{wins_per_hour:.2f} Wins/Hour", font=font_value, fill=(255, 255, 255))
+    draw.text((col_x[3], row_y), wlr_estimate, font=font_value, fill=(255, 170, 0))
+    
+    # Row separator
+    draw.line([margin, row_y + 28, canvas_w - margin, row_y + 28], fill=(50, 50, 60), width=1)
+    
+    # Row 2: KDR
+    row_y += row_height
+    kdr_color = (85, 255, 255)
+    draw.text((col_x[0], row_y), f"{milestone_kdr}.00 KDR", font=font_label, fill=kdr_color)
+    draw.text((col_x[1], row_y), f"{kills_remaining:,} Kills", font=font_value, fill=(255, 255, 255))
+    draw.text((col_x[2], row_y), f"{kills_per_hour:.2f} Kills/Hour", font=font_value, fill=(255, 255, 255))
+    draw.text((col_x[3], row_y), kdr_estimate, font=font_value, fill=(255, 170, 0))
+    
+    # Footer
+    footer_text = "Made with ❤ by chuckegg & felix"
+    font_footer = _load_font("DejaVuSans.ttf", 13)
+    bbox = draw.textbbox((0, 0), footer_text, font=font_footer)
+    text_w = bbox[2] - bbox[0]
+    draw.text(((canvas_w - text_w) // 2, canvas_h - 28), footer_text, 
+              font=font_footer, fill=(60, 60, 65))
+    
+    out = io.BytesIO()
+    composite.convert("RGB").save(out, format='PNG')
+    out.seek(0)
+    return out
+
+
+class RatiosView(discord.ui.View):
+    """View for displaying ratio milestone predictions with period tabs."""
+    
+    def __init__(self, user_data: dict, ign: str):
+        super().__init__()
+        self.ign = ign
+        self.user_data = user_data
+        self.meta = user_data.get("meta", {})
+        self.current_tab = "all-time"
+        self._load_color()
+        self.update_buttons()
+    
+    def _load_color(self):
+        """Load color and guild info for this username from database."""
+        self.ign_color = None
+        self.guild_tag = None
+        self.guild_color = None
+        try:
+            meta = get_user_meta(self.ign)
+            if meta:
+                self.ign_color = meta.get('ign_color')
+                if not self.ign_color:
+                    self.ign_color = get_rank_color_hex(meta.get('rank'))
+                self.guild_tag = meta.get('guild_tag')
+                self.guild_color = meta.get('guild_hex')
+        except Exception as e:
+            print(f"[WARNING] Failed to load color for {self.ign}: {e}")
+    
+    def _get_tab_stats(self, tab_name: str) -> dict:
+        """Extract stats for a specific tab."""
+        # Map tab names to cache keys
+        key_map = {"all-time": "lifetime"}
+        cache_key = key_map.get(tab_name, tab_name)
+        
+        stats = self.user_data.get("stats", {})
+        wins = stats.get("wins", {}).get(cache_key, 0)
+        losses = stats.get("losses", {}).get(cache_key, 0)
+        kills = stats.get("kills", {}).get(cache_key, 0)
+        deaths = stats.get("deaths", {}).get(cache_key, 0)
+        playtime = stats.get("playtime", {}).get(cache_key, 0)
+        
+        # Calculate ratios
+        wlr = wins / losses if losses > 0 else wins
+        kdr = kills / deaths if deaths > 0 else kills
+        
+        # Calculate per-hour rates
+        playtime_hours = playtime / 3600 if playtime > 0 else 0
+        wins_per_hour = wins / playtime_hours if playtime_hours > 0 else 0
+        kills_per_hour = kills / playtime_hours if playtime_hours > 0 else 0
+        
+        return {
+            "wins": int(wins),
+            "losses": int(losses),
+            "kills": int(kills),
+            "deaths": int(deaths),
+            "wlr": wlr,
+            "kdr": kdr,
+            "wins_per_hour": wins_per_hour,
+            "kills_per_hour": kills_per_hour
+        }
+    
+    def generate_ratios_image(self, tab_name: str):
+        """Generate ratios prediction image for the specified tab."""
+        stats = self._get_tab_stats(tab_name)
+        
+        # Calculate WLR milestone
+        current_wlr = stats["wlr"]
+        milestone_wlr = calculate_next_milestone(current_wlr)
+        wins_remaining = calculate_wins_needed_for_wlr(stats["wins"], stats["losses"], milestone_wlr)
+        wlr_estimate = format_time_estimate(wins_remaining, stats["wins_per_hour"])
+        
+        # Calculate KDR milestone
+        current_kdr = stats["kdr"]
+        milestone_kdr = calculate_next_milestone(current_kdr)
+        kills_remaining = calculate_kills_needed_for_kdr(stats["kills"], stats["deaths"], milestone_kdr)
+        kdr_estimate = format_time_estimate(kills_remaining, stats["kills_per_hour"])
+        
+        # Get level and prestige icon
+        level = self.meta.get("level", 0)
+        icon = self.meta.get("icon", "")
+        
+        # Create image
+        img_io = create_ratios_image(
+            self.ign, level, icon, tab_name,
+            milestone_wlr, wins_remaining, stats["wins_per_hour"], wlr_estimate,
+            milestone_kdr, kills_remaining, stats["kills_per_hour"], kdr_estimate,
+            self.ign_color, self.guild_tag, self.guild_color
+        )
+        
+        return discord.File(img_io, filename=f"{self.ign}_ratios_{tab_name}.png")
+    
+    def update_buttons(self):
+        """Update button styles based on current tab."""
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                if child.custom_id == self.current_tab:
+                    child.style = discord.ButtonStyle.primary
+                else:
+                    child.style = discord.ButtonStyle.secondary
+    
+    async def handle_tab_click(self, interaction: discord.Interaction, tab_name: str):
+        """Handle tab button clicks."""
+        self.current_tab = tab_name
+        self.update_buttons()
+        file = self.generate_ratios_image(tab_name)
+        await interaction.response.edit_message(attachments=[file], view=self)
+    
+    @discord.ui.button(label="All-time", custom_id="all-time", style=discord.ButtonStyle.primary)
+    async def all_time_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_tab_click(interaction, "all-time")
+    
+    @discord.ui.button(label="Session", custom_id="session", style=discord.ButtonStyle.secondary)
+    async def session_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_tab_click(interaction, "session")
+    
+    @discord.ui.button(label="Daily", custom_id="daily", style=discord.ButtonStyle.secondary)
+    async def daily_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_tab_click(interaction, "daily")
+    
+    @discord.ui.button(label="Yesterday", custom_id="yesterday", style=discord.ButtonStyle.secondary)
+    async def yesterday_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_tab_click(interaction, "yesterday")
+    
+    @discord.ui.button(label="Weekly", custom_id="weekly", style=discord.ButtonStyle.secondary)
+    async def weekly_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_tab_click(interaction, "weekly")
+    
+    @discord.ui.button(label="Monthly", custom_id="monthly", style=discord.ButtonStyle.secondary)
+    async def monthly_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_tab_click(interaction, "monthly")
+
+
 class LeaderboardView(discord.ui.View):
-    def __init__(self, metric: str, data_cache: dict):
+    def __init__(self, metric: str, data_cache: dict, category: str = "sheepwars"):
         super().__init__()
         self.metric = metric
         self.data_cache = data_cache
+        self.category = category
         self.current_period = "lifetime"
         self.page = 0
         self.page_size = 10
+        
+        # Category display names
+        self.category_names = {
+            "general": "Wool Games",
+            "sheepwars": "Sheep Wars",
+            "ctw": "CTW",
+            "ww": "Wool Wars"
+        }
+        self.category_display = self.category_names.get(category, category.title())
         
         # Column mappings for each period
         self.column_map = {
@@ -3708,7 +4301,13 @@ class LeaderboardView(discord.ui.View):
             "monthly": "I",       # Monthly Delta
         }
         
-        self.metric_labels = {
+        # Merge all metric labels from CATEGORY_METRICS
+        self.metric_labels = {}
+        for category_metrics in CATEGORY_METRICS.values():
+            self.metric_labels.update(category_metrics)
+        
+        # Add legacy metric labels for backwards compatibility
+        legacy_labels = {
             "kills": "Kills",
             "kills_void": "Void Kills",
             "kills_explosive": "Explosive Kills",
@@ -3732,6 +4331,7 @@ class LeaderboardView(discord.ui.View):
             "magic_wool_hit": "Magic Wool Hit",
             "playtime": "Playtime",
         }
+        self.metric_labels.update(legacy_labels)
         
         # Period selector dropdown
         self.period_select = LeaderboardPeriodSelect(self)
@@ -3764,7 +4364,8 @@ class LeaderboardView(discord.ui.View):
 
         if Image is not None:
             try:
-                img_io = create_leaderboard_image(period.title(), metric_label, image_data, page=clamped_page, total_pages=total_pages)
+                title_with_category = f"{period.title()} {self.category_display}"
+                img_io = create_leaderboard_image(title_with_category, metric_label, image_data, page=clamped_page, total_pages=total_pages)
                 filename = f"leaderboard_{self.metric}_{period}_p{clamped_page + 1}.png"
                 return None, discord.File(img_io, filename=filename), total_pages
             except Exception as e:
@@ -3778,7 +4379,7 @@ class LeaderboardView(discord.ui.View):
 
         if not leaderboard_data:
             embed = discord.Embed(
-                title=f"{period.title()} {metric_label} Leaderboard",
+                title=f"{period.title()} {self.category_display} {metric_label} Leaderboard",
                 description="No data available",
                 color=discord.Color.from_rgb(54, 57, 63)
             )
@@ -3788,7 +4389,7 @@ class LeaderboardView(discord.ui.View):
         self.page = clamped_page
 
         embed = discord.Embed(
-            title=f"{period.title()} {metric_label} Leaderboard",
+            title=f"{period.title()} {self.category_display} {metric_label} Leaderboard",
             color=discord.Color.from_rgb(54, 57, 63)
         )
 
@@ -3849,6 +4450,7 @@ class LeaderboardPeriodSelect(discord.ui.Select):
             discord.SelectOption(label="Session", value="session"),
             discord.SelectOption(label="Daily", value="daily"),
             discord.SelectOption(label="Yesterday", value="yesterday"),
+            discord.SelectOption(label="Weekly", value="weekly"),
             discord.SelectOption(label="Monthly", value="monthly"),
         ]
         super().__init__(
@@ -3867,12 +4469,16 @@ class LeaderboardPeriodSelect(discord.ui.Select):
         await self.view_ref._refresh(interaction, new_period=selected)
 
 
-def _load_leaderboard_data_from_excel(metric: str):
+def _load_leaderboard_data_from_excel(metric: str, category: str = "sheepwars"):
     """Load leaderboard data from database.
+    
+    Args:
+        metric: The stat to rank by
+        category: Which stat category (general, sheepwars, ctw, ww)
     
     Returns dict with period -> list of (username, value, display_value, is_playtime, level, icon, color, guild_tag, guild_color)
     """
-    periods = ["lifetime", "session", "daily", "yesterday", "monthly"]
+    periods = ["lifetime", "session", "daily", "yesterday", "weekly", "monthly"]
     result = {p: [] for p in periods}
     
     try:
@@ -3883,8 +4489,8 @@ def _load_leaderboard_data_from_excel(metric: str):
         user_colors = load_user_colors()
         if not user_colors:
             print("[WARN] No user colors loaded in leaderboard generation")
-        else:
-            print(f"[DEBUG] Loaded {len(user_colors)} user colors for leaderboard")
+        # else:
+            # print(f"[DEBUG] Loaded {len(user_colors)} user colors for leaderboard")
         
         for username in usernames:
             try:
@@ -3921,40 +4527,24 @@ def _load_leaderboard_data_from_excel(metric: str):
                     val = 0
                     
                     # Map metric names to database columns
-                    if metric == "kills":
-                        val = stats_dict.get("kills", {}).get(period, 0)
-                    elif metric == "deaths":
-                        val = stats_dict.get("deaths", {}).get(period, 0)
+                    # Try to get the metric directly first (works for all stats)
+                    if metric in stats_dict:
+                        val = stats_dict.get(metric, {}).get(period, 0)
+                        # Make gold_spent positive
+                        if metric == "ctw_gold_spent":
+                            val = abs(val)
+                    # Handle special ratio calculations
                     elif metric == "kdr":
                         k = stats_dict.get("kills", {}).get(period, 0)
                         d = stats_dict.get("deaths", {}).get(period, 0)
                         val = k / d if d > 0 else k
-                    elif metric == "wins":
-                        val = stats_dict.get("wins", {}).get(period, 0)
-                    elif metric == "losses":
-                        val = stats_dict.get("losses", {}).get(period, 0)
                     elif metric == "wlr":
                         w = stats_dict.get("wins", {}).get(period, 0)
                         l = stats_dict.get("losses", {}).get(period, 0)
                         val = w / l if l > 0 else w
-                    elif metric == "experience":
-                        val = stats_dict.get("experience", {}).get(period, 0)
-                    elif metric == "level":
-                        val = stats_dict.get("level", {}).get(period, 0)
-                    elif metric == "coins":
-                        val = stats_dict.get("coins", {}).get(period, 0)
-                    elif metric == "damage_dealt":
-                        val = stats_dict.get("damage_dealt", {}).get(period, 0)
-                    elif metric == "games_played":
-                        val = stats_dict.get("games_played", {}).get(period, 0)
-                    elif metric == "sheep_thrown":
-                        val = stats_dict.get("sheep_thrown", {}).get(period, 0)
-                    elif metric == "magic_wool_hit":
-                        val = stats_dict.get("magic_wool_hit", {}).get(period, 0)
-                    elif metric == "playtime":
-                        val = stats_dict.get("playtime", {}).get(period, 0)
                     else:
-                        val = stats_dict.get(metric, {}).get(period, 0)
+                        # Default fallback - return 0 if stat doesn't exist
+                        val = 0
                     
                     is_playtime = (metric == "playtime")
                     result[period].append((
@@ -3974,7 +4564,7 @@ def _load_leaderboard_data_from_excel(metric: str):
         return result
 
 def _process_leaderboard_data(cache_data, metric):
-    periods = ["lifetime", "session", "daily", "yesterday", "monthly"]
+    periods = ["lifetime", "session", "daily", "yesterday", "weekly", "monthly"]
     result = {p: [] for p in periods}
 
     for username, data in cache_data.items():
@@ -4072,20 +4662,148 @@ def _calculate_ratio_value_from_excel(stats_dict: dict, period: str, metric: str
             return round(kills / hours, 2) if hours > 0 else 0
         elif metric == "sheeps_per_game":
             sheep = stats_dict.get("sheep_thrown", {}).get(period, 0)
-            games = stats_dict.get("games_pulled", {}).get(period, 0)
+            games = stats_dict.get("games_played", {}).get(period, 0)
             return round(sheep / games, 2) if games > 0 else 0
         elif metric == "survival_rate":
             games = stats_dict.get("games_played", {}).get(period, 0)
             deaths = stats_dict.get("deaths", {}).get(period, 0)
             return round((games - deaths) / games, 2) if games > 0 else 0
+        elif metric == "carried_score":
+            wins = stats_dict.get("wins", {}).get(period, 0)
+            losses = stats_dict.get("losses", {}).get(period, 0)
+            kills = stats_dict.get("kills", {}).get(period, 0)
+            deaths = stats_dict.get("deaths", {}).get(period, 0)
+            games = stats_dict.get("games_played", {}).get(period, 0)
+            if games > 0 and deaths > 0:
+                return calculate_carried_score_average(wins, losses, kills, deaths, games)
+            return 0
+        
+        # CTW Ratios
+        elif metric == "ctw_wl_ratio":
+            wins = stats_dict.get("ctw_experienced_wins", {}).get(period, 0)
+            losses = stats_dict.get("ctw_experienced_losses", {}).get(period, 0)
+            return round(wins / losses, 2) if losses > 0 else wins
+        elif metric == "ctw_kd_ratio":
+            kills = stats_dict.get("ctw_kills", {}).get(period, 0)
+            deaths = stats_dict.get("ctw_deaths", {}).get(period, 0)
+            return round(kills / deaths, 2) if deaths > 0 else kills
+        elif metric == "ctw_kills_per_game":
+            kills = stats_dict.get("ctw_kills", {}).get(period, 0)
+            wins = stats_dict.get("ctw_experienced_wins", {}).get(period, 0)
+            losses = stats_dict.get("ctw_experienced_losses", {}).get(period, 0)
+            games = wins + losses
+            return round(kills / games, 2) if games > 0 else 0
+        elif metric == "ctw_deaths_per_game":
+            deaths = stats_dict.get("ctw_deaths", {}).get(period, 0)
+            wins = stats_dict.get("ctw_experienced_wins", {}).get(period, 0)
+            losses = stats_dict.get("ctw_experienced_losses", {}).get(period, 0)
+            games = wins + losses
+            return round(deaths / games, 2) if games > 0 else 0
+        elif metric == "ctw_kd_on_woolholder":
+            kills = stats_dict.get("ctw_kills_on_woolholder", {}).get(period, 0)
+            deaths = stats_dict.get("ctw_deaths_to_woolholder", {}).get(period, 0)
+            return round(kills / deaths, 2) if deaths > 0 else kills
+        elif metric == "ctw_kd_as_woolholder":
+            kills = stats_dict.get("ctw_kills_with_wool", {}).get(period, 0)
+            deaths = stats_dict.get("ctw_deaths_with_wool", {}).get(period, 0)
+            return round(kills / deaths, 2) if deaths > 0 else kills
+        elif metric == "ctw_woolholder_kills_per_game":
+            kills = stats_dict.get("ctw_kills_on_woolholder", {}).get(period, 0)
+            wins = stats_dict.get("ctw_experienced_wins", {}).get(period, 0)
+            losses = stats_dict.get("ctw_experienced_losses", {}).get(period, 0)
+            games = wins + losses
+            return round(kills / games, 2) if games > 0 else 0
+        elif metric == "ctw_woolholder_kills_per_kill":
+            wh_kills = stats_dict.get("ctw_kills_on_woolholder", {}).get(period, 0)
+            kills = stats_dict.get("ctw_kills", {}).get(period, 0)
+            return round(wh_kills / kills, 2) if kills > 0 else 0
+        elif metric == "ctw_wools_captured_per_game":
+            wools = stats_dict.get("ctw_wools_captured", {}).get(period, 0)
+            wins = stats_dict.get("ctw_experienced_wins", {}).get(period, 0)
+            losses = stats_dict.get("ctw_experienced_losses", {}).get(period, 0)
+            games = wins + losses
+            return round(wools / games, 2) if games > 0 else 0
+        elif metric == "ctw_wools_captured_per_death":
+            wools = stats_dict.get("ctw_wools_captured", {}).get(period, 0)
+            deaths = stats_dict.get("ctw_deaths", {}).get(period, 0)
+            return round(wools / deaths, 2) if deaths > 0 else 0
+        elif metric == "ctw_gold_earned_per_game":
+            gold = stats_dict.get("ctw_gold_earned", {}).get(period, 0)
+            wins = stats_dict.get("ctw_experienced_wins", {}).get(period, 0)
+            losses = stats_dict.get("ctw_experienced_losses", {}).get(period, 0)
+            games = wins + losses
+            return round(gold / games, 2) if games > 0 else 0
+        elif metric == "ctw_gold_spent_per_game":
+            gold = abs(stats_dict.get("ctw_gold_spent", {}).get(period, 0))
+            wins = stats_dict.get("ctw_experienced_wins", {}).get(period, 0)
+            losses = stats_dict.get("ctw_experienced_losses", {}).get(period, 0)
+            games = wins + losses
+            return round(gold / games, 2) if games > 0 else 0
+        elif metric == "ctw_wools_stolen_per_game":
+            wools = stats_dict.get("ctw_wools_stolen", {}).get(period, 0)
+            wins = stats_dict.get("ctw_experienced_wins", {}).get(period, 0)
+            losses = stats_dict.get("ctw_experienced_losses", {}).get(period, 0)
+            games = wins + losses
+            return round(wools / games, 2) if games > 0 else 0
+        
+        # WW Ratios
+        elif metric == "ww_wl_ratio":
+            wins = stats_dict.get("ww_wins", {}).get(period, 0)
+            games = stats_dict.get("ww_games_played", {}).get(period, 0)
+            losses = games - wins
+            return round(wins / losses, 2) if losses > 0 else wins
+        elif metric == "ww_kd_ratio":
+            kills = stats_dict.get("ww_kills", {}).get(period, 0)
+            deaths = stats_dict.get("ww_deaths", {}).get(period, 0)
+            return round(kills / deaths, 2) if deaths > 0 else kills
+        elif metric == "ww_kills_per_game":
+            kills = stats_dict.get("ww_kills", {}).get(period, 0)
+            games = stats_dict.get("ww_games_played", {}).get(period, 0)
+            return round(kills / games, 2) if games > 0 else 0
+        elif metric == "ww_assists_per_game":
+            assists = stats_dict.get("ww_assists", {}).get(period, 0)
+            games = stats_dict.get("ww_games_played", {}).get(period, 0)
+            return round(assists / games, 2) if games > 0 else 0
+        elif metric == "ww_kill_assist_ratio":
+            kills = stats_dict.get("ww_kills", {}).get(period, 0)
+            assists = stats_dict.get("ww_assists", {}).get(period, 0)
+            return round(kills / assists, 2) if assists > 0 else kills
+        elif metric == "ww_assists_per_death":
+            assists = stats_dict.get("ww_assists", {}).get(period, 0)
+            deaths = stats_dict.get("ww_deaths", {}).get(period, 0)
+            return round(assists / deaths, 2) if deaths > 0 else 0
+        
+        # WW Class-specific ratios (tank, assault, golem, swordsman, archer, engineer)
+        elif metric.startswith("ww_") and ("_kd_ratio" in metric or "_assists_per_death" in metric or "_kill_assist_ratio" in metric):
+            # Extract class name
+            for class_name in ["tank", "assault", "golem", "swordsman", "archer", "engineer"]:
+                if f"ww_{class_name}_" in metric:
+                    if metric.endswith("_kd_ratio"):
+                        kills = stats_dict.get(f"ww_{class_name}_kills", {}).get(period, 0)
+                        deaths = stats_dict.get(f"ww_{class_name}_deaths", {}).get(period, 0)
+                        return round(kills / deaths, 2) if deaths > 0 else kills
+                    elif metric.endswith("_assists_per_death"):
+                        assists = stats_dict.get(f"ww_{class_name}_assists", {}).get(period, 0)
+                        deaths = stats_dict.get(f"ww_{class_name}_deaths", {}).get(period, 0)
+                        return round(assists / deaths, 2) if deaths > 0 else 0
+                    elif metric.endswith("_kill_assist_ratio"):
+                        kills = stats_dict.get(f"ww_{class_name}_kills", {}).get(period, 0)
+                        assists = stats_dict.get(f"ww_{class_name}_assists", {}).get(period, 0)
+                        return round(kills / assists, 2) if assists > 0 else kills
+                    break
     except Exception as e:
         print(f"[ERROR] Exception in _calculate_ratio_value_from_excel for metric {metric}: {e}")
         return None
     return None
 
-def _load_ratio_leaderboard_data_from_excel(metric: str):
-    """Load ratio leaderboard data from database."""
-    periods = ["lifetime", "session", "daily", "yesterday", "monthly"]
+def _load_ratio_leaderboard_data_from_excel(metric: str, category: str = "sheepwars"):
+    """Load ratio leaderboard data from database.
+    
+    Args:
+        metric: The ratio stat to rank by
+        category: Which stat category (general, sheepwars, ctw, ww)
+    """
+    periods = ["lifetime", "session", "daily", "yesterday", "weekly", "monthly"]
     result = {p: [] for p in periods}
     
     try:
@@ -4096,8 +4814,8 @@ def _load_ratio_leaderboard_data_from_excel(metric: str):
         user_colors = load_user_colors()
         if not user_colors:
             print("[WARN] No user colors loaded in ratio leaderboard generation")
-        else:
-            print(f"[DEBUG] Loaded {len(user_colors)} user colors for ratio leaderboard")
+        # else:
+            # print(f"[DEBUG] Loaded {len(user_colors)} user colors for ratio leaderboard")
         
         for username in usernames:
             try:
@@ -4132,8 +4850,11 @@ def _load_ratio_leaderboard_data_from_excel(metric: str):
                 # Process each period
                 for period in periods:
                     val = _calculate_ratio_value_from_excel(stats_dict, period, metric)
-                    # For survival_rate, only add if val is positive (0 means no games played)
-                    if val is not None and not (metric == "survival_rate" and val <= 0):
+                    # Filter out invalid values
+                    # - survival_rate: 0 means no games played
+                    # - carried_score: 0 means insufficient data (not a valid score)
+                    should_add = val is not None and val != 0 if metric in ["survival_rate", "carried_score"] else val is not None
+                    if should_add:
                         result[period].append((
                             username, float(val), val, level, icon, ign_color, guild_tag, guild_color
                         ))
@@ -4141,9 +4862,12 @@ def _load_ratio_leaderboard_data_from_excel(metric: str):
                 print(f"[LEADERBOARD] Error processing {username}: {e}")
                 continue
             
-        # Sort each period by value descending
+        # Sort each period by value descending (except carried_score which is ascending)
         for p in result:
-            result[p].sort(key=lambda x: x[1], reverse=True)
+            if metric == "carried_score":
+                result[p].sort(key=lambda x: x[1], reverse=False)  # Ascending: lower is better
+            else:
+                result[p].sort(key=lambda x: x[1], reverse=True)  # Descending: higher is better
         
         return result
     except Exception as e:
@@ -4228,7 +4952,7 @@ def _calculate_ratio_value_from_cache(stats, period, metric):
     return None
 
 def _process_ratio_data(cache_data, metric):
-    periods = ["lifetime", "session", "daily", "yesterday", "monthly"]
+    periods = ["lifetime", "session", "daily", "yesterday", "weekly", "monthly"]
     result = {p: [] for p in periods}
 
     for username, data in cache_data.items():
@@ -4248,13 +4972,23 @@ def _process_ratio_data(cache_data, metric):
     return result
 
 class RatioLeaderboardView(discord.ui.View):
-    def __init__(self, metric: str, data_cache: dict):
+    def __init__(self, metric: str, data_cache: dict, category: str = "sheepwars"):
         super().__init__()
         self.metric = metric
         self.data_cache = data_cache
+        self.category = category
         self.current_period = "lifetime"
         self.page = 0
         self.page_size = 10
+        
+        # Category display names
+        self.category_names = {
+            "general": "Wool Games",
+            "sheepwars": "Sheep Wars",
+            "ctw": "CTW",
+            "ww": "Wool Wars"
+        }
+        self.category_display = self.category_names.get(category, category.title())
         
         # Column mappings for each period
         self.column_map = {
@@ -4266,7 +5000,13 @@ class RatioLeaderboardView(discord.ui.View):
             "monthly": "I",       # Monthly Delta
         }
         
-        self.metric_labels = {
+        # Merge all metric labels from CATEGORY_METRICS
+        self.metric_labels = {}
+        for category_metrics in CATEGORY_METRICS.values():
+            self.metric_labels.update(category_metrics)
+        
+        # Add legacy ratio metric labels for backwards compatibility
+        legacy_ratio_labels = {
             "wl_ratio": "W/L Ratio",
             "kd_ratio": "K/D Ratio",
             "kills_per_game": "Kills/Game",
@@ -4284,7 +5024,9 @@ class RatioLeaderboardView(discord.ui.View):
             "exp_per_hour": "EXP/Hour",
             "exp_per_game": "EXP/Game",
             "survival_rate": "Survival Rate",
+            "carried_score": "Carried Score",
         }
+        self.metric_labels.update(legacy_ratio_labels)
         
         # Period selector dropdown
         self.period_select = RatioPeriodSelect(self)
@@ -4317,7 +5059,8 @@ class RatioLeaderboardView(discord.ui.View):
 
         if Image is not None:
             try:
-                img_io = create_leaderboard_image(period.title(), metric_label, image_data, page=clamped_page, total_pages=total_pages)
+                title_with_category = f"{period.title()} {self.category_display}"
+                img_io = create_leaderboard_image(title_with_category, metric_label, image_data, page=clamped_page, total_pages=total_pages)
                 filename = f"ratio_leaderboard_{self.metric}_{period}_p{clamped_page + 1}.png"
                 return None, discord.File(img_io, filename=filename), total_pages
             except Exception as e:
@@ -4331,7 +5074,7 @@ class RatioLeaderboardView(discord.ui.View):
 
         if not leaderboard_data:
             embed = discord.Embed(
-                title=f"{period.title()} {metric_label} Leaderboard",
+                title=f"{period.title()} {self.category_display} {metric_label} Leaderboard",
                 description="No data available",
                 color=discord.Color.from_rgb(54, 57, 63)
             )
@@ -4341,7 +5084,7 @@ class RatioLeaderboardView(discord.ui.View):
         self.page = clamped_page
 
         embed = discord.Embed(
-            title=f"{period.title()} {metric_label} Leaderboard",
+            title=f"{period.title()} {self.category_display} {metric_label} Leaderboard",
             color=discord.Color.from_rgb(54, 57, 63)
         )
 
@@ -5015,6 +5758,68 @@ async def untrack(interaction: discord.Interaction, ign: str):
             
     except Exception as e:
         await interaction.followup.send(f"[ERROR] Failed to untrack: {str(e)}")
+
+@bot.tree.command(name="remove", description="[Admin] Force remove a user from tracking (case-sensitive)")
+@discord.app_commands.describe(ign="Exact Minecraft IGN to remove (case-sensitive)")
+async def remove_tracked(interaction: discord.Interaction, ign: str):
+    """Admin-only command to force remove a tracked user with exact casing."""
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            return
+    
+    # Admin only
+    if not is_admin(interaction.user):
+        await interaction.followup.send("❌ [ERROR] This command is admin-only.")
+        return
+    
+    try:
+        # Use exact casing - query database with case-sensitive match
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Remove from tracked_users (exact match)
+            cursor.execute('DELETE FROM tracked_users WHERE username = ?', (ign,))
+            removed_tracked = cursor.rowcount > 0
+            
+            # Remove from user_links (exact match)
+            cursor.execute('DELETE FROM user_links WHERE username = ?', (ign,))
+            removed_link = cursor.rowcount > 0
+            
+            # Remove from user_meta (case-insensitive for color/metadata)
+            cursor.execute('DELETE FROM user_meta WHERE LOWER(username) = LOWER(?)', (ign,))
+            removed_meta = cursor.rowcount > 0
+            
+            conn.commit()
+        
+        # Also try to delete the sheet
+        removed_sheet = delete_user_sheet(ign)
+        
+        if removed_tracked or removed_link or removed_meta or removed_sheet:
+            results = []
+            if removed_tracked:
+                results.append(f"tracked users ({ign})")
+            if removed_link:
+                results.append("user links")
+            if removed_meta:
+                results.append("user metadata")
+            if removed_sheet:
+                results.append("stats sheet")
+            
+            await interaction.followup.send(
+                f"✅ Successfully force-removed **{ign}** (exact casing).\n"
+                f"Removed from: {', '.join(results)}.\n\n"
+                f"⚠️ Note: This was a case-sensitive removal. If duplicate casings exist, run this command again with the other casing."
+            )
+        else:
+            await interaction.followup.send(
+                f"⚠️ [WARNING] **{ign}** (exact casing) was not found in tracking data.\n\n"
+                f"💡 Tip: This command is case-sensitive. Make sure the casing matches exactly."
+            )
+            
+    except Exception as e:
+        await interaction.followup.send(f"❌ [ERROR] Failed to remove: {str(e)}")
 
 # Create color choices from MINECRAFT_CODE_TO_HEX
 COLOR_CHOICES = [
@@ -5987,6 +6792,107 @@ async def deathdistribution(interaction: discord.Interaction, ign: str = None):
     except Exception as e:
         await interaction.followup.send(f"[ERROR] {str(e)}")
 
+@bot.tree.command(name="ratios", description="Predict when you'll reach the next WLR and KDR milestones")
+@discord.app_commands.describe(ign="Minecraft IGN (optional if you set /default)")
+async def ratios(interaction: discord.Interaction, ign: str = None):
+    """Display milestone predictions for Win/Loss and Kill/Death ratios."""
+    print(f"[DEBUG] /ratios triggered for IGN: {ign} by user: {interaction.user.name} in guild: {interaction.guild.name if interaction.guild else 'DM'}")
+    
+    # Resolve default IGN if not provided
+    if ign is None or str(ign).strip() == "":
+        default_ign = get_default_user(interaction.user.id)
+        if not default_ign:
+            await interaction.response.send_message("You don't have a default username set. Use /default to set one.", ephemeral=True)
+            return
+        ign = default_ign
+    
+    # Validate username early
+    ok, proper_ign = validate_and_normalize_ign(ign)
+    if not ok:
+        await interaction.response.send_message(f"The username {ign} is invalid.", ephemeral=True)
+        return
+    ign = proper_ign
+    
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except (discord.errors.NotFound, discord.errors.HTTPException) as e:
+            print(f"[DEBUG] Defer failed for {ign} in /ratios: {e}")
+            return
+    
+    try:
+        # Fetch fresh stats
+        print(f"[DEBUG] Running api_get.py for IGN: {ign} (/ratios)")
+        result = run_script("api_get.py", ["-ign", ign])
+        print(f"[DEBUG] api_get.py returncode (/ratios): {result.returncode}")
+        
+        if result.returncode != 0:
+            if result.stderr and "429" in result.stderr:
+                print(f"[DEBUG] Rate limited for {ign} (/ratios), attempting to use existing data")
+            else:
+                error_msg = result.stderr or result.stdout or "Unknown error"
+                await interaction.followup.send(f"[ERROR] Failed to fetch stats:\n```{error_msg[:500]}```")
+                return
+        
+        # Optimistically update cache if we have JSON output
+        try:
+            if result.stdout:
+                json_data = None
+                for line in reversed(result.stdout.splitlines()):
+                    line = line.strip()
+                    if line.startswith('{') and line.endswith('}'):
+                        try:
+                            json_data = json.loads(line)
+                            break
+                        except json.JSONDecodeError:
+                            continue
+                
+                if json_data and "processed_stats" in json_data and "username" in json_data:
+                    await STATS_CACHE.update_cache_entry(json_data["username"], json_data["processed_stats"])
+                    ign = json_data["username"]
+        except Exception as e:
+            print(f"[WARNING] Failed to update cache from output: {e}")
+        
+        # Get user data from cache
+        cache_data = await STATS_CACHE.get_data()
+        
+        # Find user in cache case-insensitively
+        key = ign.casefold()
+        user_data = None
+        actual_ign = ign
+        for name, data in cache_data.items():
+            if name.casefold() == key:
+                user_data = data
+                actual_ign = name
+                break
+        
+        if not user_data:
+            await interaction.followup.send(f"[ERROR] Player sheet '{ign}' not found")
+            return
+        
+        # Check if user is tracked
+        tracked_users = load_tracked_users()
+        is_tracked = any(u.casefold() == actual_ign.casefold() for u in tracked_users)
+        
+        # Create view and generate image
+        view = RatiosView(user_data, actual_ign)
+        file = view.generate_ratios_image("all-time")
+        
+        if is_tracked:
+            await interaction.followup.send(file=file, view=view)
+        else:
+            message = f"{actual_ign} is not currently tracked. Only all-time stats are available.\nUse `/track ign:{actual_ign}` to start tracking and enable session/daily/monthly stats."
+            await interaction.followup.send(content=message, file=file)
+            bot.loop.create_task(cleanup_untracked_user_delayed(actual_ign, delay_seconds=60))
+    
+    except subprocess.TimeoutExpired:
+        await interaction.followup.send("[ERROR] Command timed out (30s limit)")
+    except Exception as e:
+        print(f"[ERROR] /ratios exception: {e}")
+        import traceback
+        traceback.print_exc()
+        await interaction.followup.send(f"[ERROR] {str(e)}")
+
 @bot.tree.command(name="sheepwars", description="Get player stats with deltas")
 @discord.app_commands.describe(ign="Minecraft IGN (optional if you set /default)")
 async def sheepwars(interaction: discord.Interaction, ign: str = None):
@@ -6067,6 +6973,7 @@ async def sheepwars(interaction: discord.Interaction, ign: str = None):
         "session": "session",
         "daily": "daily",
         "yesterday": "yesterday",
+        "weekly": "weekly",
         "monthly": "monthly"
     }
     
@@ -6112,161 +7019,740 @@ async def sheepwars(interaction: discord.Interaction, ign: str = None):
         bot.loop.create_task(cleanup_untracked_user_delayed(ign, delay_seconds=60))
 
 # Standalone leaderboard commands
-@bot.tree.command(name="leaderboard", description="View player leaderboards")
+# Define category metrics globally for autocomplete
+CATEGORY_METRICS = {
+    "general": {
+        "level": "Level",
+        "experience": "Experience",
+        "coins": "Coins",
+        "playtime": "Playtime",
+        "available_layers": "Available Layers",
+    },
+    "sheepwars": {
+        "kills": "Total Kills",
+        "deaths": "Total Deaths",
+        "kdr": "K/D Ratio",
+        "wins": "Wins",
+        "losses": "Losses",
+        "wlr": "W/L Ratio",
+        "damage_dealt": "Damage Dealt",
+        "games_played": "Games Played",
+        "sheep_thrown": "Sheep Thrown",
+        "magic_wool_hit": "Magic Wool Hit",
+        "kills_void": "Void Kills",
+        "kills_explosive": "Explosive Kills",
+        "kills_melee": "Melee Kills",
+        "kills_bow": "Bow Kills",
+        "deaths_void": "Void Deaths",
+        "deaths_explosive": "Explosive Deaths",
+        "deaths_melee": "Melee Deaths",
+        "deaths_bow": "Bow Deaths",
+        # Ratios
+        "wl_ratio": "Win/Loss Ratio",
+        "kd_ratio": "Kill/Death Ratio",
+        "kills_per_game": "Kills per Game",
+        "kills_per_win": "Kills per Win",
+        "kills_per_hour": "Kills per Hour",
+        "damage_per_game": "Damage per Game",
+        "damage_per_sheep": "Damage per Sheep",
+        "wools_per_game": "Wools per Game",
+        "sheeps_per_game": "Sheeps per Game",
+        "void_kd_ratio": "Void K/D Ratio",
+        "explosive_kd_ratio": "Explosive K/D Ratio",
+        "bow_kd_ratio": "Bow K/D Ratio",
+        "melee_kd_ratio": "Melee K/D Ratio",
+        "wins_per_hour": "Wins per Hour",
+        "exp_per_hour": "EXP per Hour",
+        "exp_per_game": "EXP per Game",
+        "survival_rate": "Survival Rate",
+        "carried_score": "Carried Score",
+    },
+    "ctw": {
+        "ctw_kills": "Kills",
+        "ctw_deaths": "Deaths",
+        "ctw_assists": "Assists",
+        "ctw_wools_captured": "Wools Captured",
+        "ctw_wools_stolen": "Wools Stolen",
+        "ctw_kills_on_woolholder": "Kills on Wool Holder",
+        "ctw_kills_with_wool": "Kills with Wool",
+        "ctw_deaths_to_woolholder": "Deaths to Wool Holder",
+        "ctw_deaths_with_wool": "Deaths with Wool",
+        "ctw_gold_earned": "Gold Earned",
+        "ctw_gold_spent": "Gold Spent",
+        "ctw_experienced_wins": "Experienced Wins",
+        "ctw_experienced_losses": "Experienced Losses",
+        "ctw_participated_wins": "Participated Wins",
+        "ctw_participated_losses": "Participated Losses",
+        "ctw_fastest_win": "Fastest Win",
+        "ctw_fastest_wool_capture": "Fastest Wool Capture",
+        "ctw_longest_game": "Longest Game",
+        "ctw_most_kills_and_assists": "Most Kills & Assists",
+        "ctw_most_gold_earned": "Most Gold Earned",
+        # CTW Ratios
+        "ctw_wl_ratio": "Win/Loss Ratio",
+        "ctw_kd_ratio": "Kill/Death Ratio",
+        "ctw_kills_per_game": "Kills per Game",
+        "ctw_deaths_per_game": "Deaths per Game",
+        "ctw_kd_on_woolholder": "K/D vs Wool Holder",
+        "ctw_kd_as_woolholder": "K/D as Wool Holder",
+        "ctw_woolholder_kills_per_game": "Wool Holder Kills per Game",
+        "ctw_woolholder_kills_per_kill": "Wool Holder Kills per Kill",
+        "ctw_wools_captured_per_game": "Wools Captured per Game",
+        "ctw_wools_captured_per_death": "Wools Captured per Death",
+        "ctw_gold_earned_per_game": "Gold Earned per Game",
+        "ctw_gold_spent_per_game": "Gold Spent per Game",
+        "ctw_wools_stolen_per_game": "Wools Stolen per Game",
+    },
+    "ww": {
+        "ww_kills": "Kills",
+        "ww_deaths": "Deaths",
+        "ww_assists": "Assists",
+        "ww_wins": "Wins",
+        "ww_games_played": "Games Played",
+        "ww_wool_placed": "Wool Placed",
+        "ww_blocks_broken": "Blocks Broken",
+        "ww_powerups_gotten": "Powerups Gotten",
+        # Class-specific stats
+        "ww_tank_kills": "Tank Kills",
+        "ww_tank_deaths": "Tank Deaths",
+        "ww_tank_assists": "Tank Assists",
+        "ww_assault_kills": "Assault Kills",
+        "ww_assault_deaths": "Assault Deaths",
+        "ww_assault_assists": "Assault Assists",
+        "ww_golem_kills": "Golem Kills",
+        "ww_golem_deaths": "Golem Deaths",
+        "ww_golem_assists": "Golem Assists",
+        "ww_swordsman_kills": "Swordsman Kills",
+        "ww_swordsman_deaths": "Swordsman Deaths",
+        "ww_swordsman_assists": "Swordsman Assists",
+        "ww_archer_kills": "Archer Kills",
+        "ww_archer_deaths": "Archer Deaths",
+        "ww_archer_assists": "Archer Assists",
+        "ww_engineer_kills": "Engineer Kills",
+        "ww_engineer_deaths": "Engineer Deaths",
+        "ww_engineer_assists": "Engineer Assists",
+        # WW Ratios
+        "ww_wl_ratio": "Win/Loss Ratio",
+        "ww_kd_ratio": "Kill/Death Ratio",
+        "ww_kills_per_game": "Kills per Game",
+        "ww_assists_per_game": "Assists per Game",
+        "ww_kill_assist_ratio": "Kill/Assist Ratio",
+        "ww_assists_per_death": "Assists per Death",
+        # Class-specific ratios
+        "ww_tank_kd_ratio": "Tank K/D Ratio",
+        "ww_tank_assists_per_death": "Tank Assists per Death",
+        "ww_tank_kill_assist_ratio": "Tank Kill/Assist Ratio",
+        "ww_assault_kd_ratio": "Assault K/D Ratio",
+        "ww_assault_assists_per_death": "Assault Assists per Death",
+        "ww_assault_kill_assist_ratio": "Assault Kill/Assist Ratio",
+        "ww_golem_kd_ratio": "Golem K/D Ratio",
+        "ww_golem_assists_per_death": "Golem Assists per Death",
+        "ww_golem_kill_assist_ratio": "Golem Kill/Assist Ratio",
+        "ww_swordsman_kd_ratio": "Swordsman K/D Ratio",
+        "ww_swordsman_assists_per_death": "Swordsman Assists per Death",
+        "ww_swordsman_kill_assist_ratio": "Swordsman Kill/Assist Ratio",
+        "ww_archer_kd_ratio": "Archer K/D Ratio",
+        "ww_archer_assists_per_death": "Archer Assists per Death",
+        "ww_archer_kill_assist_ratio": "Archer Kill/Assist Ratio",
+        "ww_engineer_kd_ratio": "Engineer K/D Ratio",
+        "ww_engineer_assists_per_death": "Engineer Assists per Death",
+        "ww_engineer_kill_assist_ratio": "Engineer Kill/Assist Ratio",
+    }
+}
+
+# Create leaderboard command group
+leaderboard_group = discord.app_commands.Group(name="leaderboard", description="View player leaderboards")
+
+async def general_metric_autocomplete(interaction: discord.Interaction, current: str) -> list[discord.app_commands.Choice[str]]:
+    """Autocomplete for general stats metrics."""
+    metrics = CATEGORY_METRICS.get("general", {})
+    current_lower = current.lower()
+    matches = [
+        discord.app_commands.Choice(name=f"{display_name}", value=key)
+        for key, display_name in metrics.items()
+        if current_lower in key.lower() or current_lower in display_name.lower()
+    ]
+    return matches[:25]
+
+async def sheepwars_metric_autocomplete(interaction: discord.Interaction, current: str) -> list[discord.app_commands.Choice[str]]:
+    """Autocomplete for sheep wars stats metrics."""
+    metrics = CATEGORY_METRICS.get("sheepwars", {})
+    current_lower = current.lower()
+    matches = [
+        discord.app_commands.Choice(name=f"{display_name}", value=key)
+        for key, display_name in metrics.items()
+        if current_lower in key.lower() or current_lower in display_name.lower()
+    ]
+    return matches[:25]
+
+async def ctw_metric_autocomplete(interaction: discord.Interaction, current: str) -> list[discord.app_commands.Choice[str]]:
+    """Autocomplete for CTW stats metrics."""
+    metrics = CATEGORY_METRICS.get("ctw", {})
+    current_lower = current.lower()
+    matches = [
+        discord.app_commands.Choice(name=f"{display_name}", value=key)
+        for key, display_name in metrics.items()
+        if current_lower in key.lower() or current_lower in display_name.lower()
+    ]
+    return matches[:25]
+
+async def ww_metric_autocomplete(interaction: discord.Interaction, current: str) -> list[discord.app_commands.Choice[str]]:
+    """Autocomplete for Wool Wars stats metrics."""
+    metrics = CATEGORY_METRICS.get("ww", {})
+    current_lower = current.lower()
+    matches = [
+        discord.app_commands.Choice(name=f"{display_name}", value=key)
+        for key, display_name in metrics.items()
+        if current_lower in key.lower() or current_lower in display_name.lower()
+    ]
+    return matches[:25]
+
+@leaderboard_group.command(name="general", description="View general stats leaderboards")
 @discord.app_commands.describe(metric="Choose a stat to rank players by")
-@discord.app_commands.choices(metric=[
-    discord.app_commands.Choice(name="Kills", value="kills"),
-    discord.app_commands.Choice(name="Deaths", value="deaths"),
-    discord.app_commands.Choice(name="K/D Ratio", value="kdr"),
-    discord.app_commands.Choice(name="Wins", value="wins"),
-    discord.app_commands.Choice(name="Losses", value="losses"),
-    discord.app_commands.Choice(name="W/L Ratio", value="wlr"),
-    discord.app_commands.Choice(name="Experience", value="experience"),
-    discord.app_commands.Choice(name="Level", value="level"),
-    discord.app_commands.Choice(name="Coins", value="coins"),
-    discord.app_commands.Choice(name="Damage Dealt", value="damage_dealt"),
-    discord.app_commands.Choice(name="Games Played", value="games_played"),
-    discord.app_commands.Choice(name="Sheep Thrown", value="sheep_thrown"),
-    discord.app_commands.Choice(name="Magic Wool Hit", value="magic_wool_hit"),
-    discord.app_commands.Choice(name="Playtime", value="playtime"),
-])
-async def leaderboard(interaction: discord.Interaction, metric: discord.app_commands.Choice[str]):
+@discord.app_commands.autocomplete(metric=general_metric_autocomplete)
+async def leaderboard_general(interaction: discord.Interaction, metric: str):
+    """General stats leaderboard."""
+    await _handle_leaderboard(interaction, "general", metric)
+
+@leaderboard_group.command(name="sheepwars", description="View Sheep Wars stats leaderboards")
+@discord.app_commands.describe(metric="Choose a stat to rank players by")
+@discord.app_commands.autocomplete(metric=sheepwars_metric_autocomplete)
+async def leaderboard_sheepwars(interaction: discord.Interaction, metric: str):
+    """Sheep Wars stats leaderboard."""
+    await _handle_leaderboard(interaction, "sheepwars", metric)
+
+@leaderboard_group.command(name="ctw", description="View Capture the Wool stats leaderboards")
+@discord.app_commands.describe(metric="Choose a stat to rank players by")
+@discord.app_commands.autocomplete(metric=ctw_metric_autocomplete)
+async def leaderboard_ctw(interaction: discord.Interaction, metric: str):
+    """Capture the Wool stats leaderboard."""
+    await _handle_leaderboard(interaction, "ctw", metric)
+
+@leaderboard_group.command(name="ww", description="View Wool Wars stats leaderboards")
+@discord.app_commands.describe(metric="Choose a stat to rank players by")
+@discord.app_commands.autocomplete(metric=ww_metric_autocomplete)
+async def leaderboard_ww(interaction: discord.Interaction, metric: str):
+    """Wool Wars stats leaderboard."""
+    await _handle_leaderboard(interaction, "ww", metric)
+
+# Add the leaderboard group to the bot
+bot.tree.add_command(leaderboard_group)
+
+
+# ==============================
+# RANKINGS COMMANDS
+# ==============================
+
+def _calculate_user_rankings(username: str, category: str):
+    """Calculate rankings for a specific user across all metrics in a category.
+    
+    Returns:
+        dict: {
+            period: {
+                metric: (rank, total_players, value)
+            }
+        }
+    """
+    periods = ["lifetime", "session", "daily", "yesterday", "weekly", "monthly"]
+    metrics = CATEGORY_METRICS.get(category, {})
+    
+    # Initialize result structure
+    result = {period: {} for period in periods}
+    user_is_tracked = is_tracked_user(username)
+    
+    # Get user's stats
+    try:
+        user_stats = get_user_stats_with_deltas(username)
+        if not user_stats:
+            return None
+    except Exception as e:
+        print(f"[RANKINGS] Error getting user stats: {e}")
+        return None
+    
+    # Define ratio metrics
+    ratio_metrics = {
+        "kdr", "wlr", "wl_ratio", "kd_ratio", "kills_per_game", "kills_per_win",
+        "kills_per_hour", "damage_per_game", "damage_per_sheep", "wools_per_game",
+        "sheeps_per_game", "void_kd_ratio", "explosive_kd_ratio", "bow_kd_ratio",
+        "melee_kd_ratio", "wins_per_hour", "exp_per_hour", "exp_per_game",
+        "survival_rate", "carried_score",
+        # CTW ratios
+        "ctw_wl_ratio", "ctw_kd_ratio", "ctw_kills_per_game", "ctw_deaths_per_game",
+        "ctw_kd_on_woolholder", "ctw_kd_as_woolholder", "ctw_woolholder_kills_per_game",
+        "ctw_woolholder_kills_per_kill", "ctw_wools_captured_per_game", "ctw_wools_captured_per_death",
+        "ctw_gold_earned_per_game", "ctw_gold_spent_per_game", "ctw_wools_stolen_per_game",
+        # WW ratios
+        "ww_wl_ratio", "ww_kd_ratio", "ww_kills_per_game", "ww_assists_per_game",
+        "ww_kill_assist_ratio", "ww_assists_per_death",
+        # WW class-specific ratios
+        "ww_tank_kd_ratio", "ww_tank_assists_per_death", "ww_tank_kill_assist_ratio",
+        "ww_assault_kd_ratio", "ww_assault_assists_per_death", "ww_assault_kill_assist_ratio",
+        "ww_golem_kd_ratio", "ww_golem_assists_per_death", "ww_golem_kill_assist_ratio",
+        "ww_swordsman_kd_ratio", "ww_swordsman_assists_per_death", "ww_swordsman_kill_assist_ratio",
+        "ww_archer_kd_ratio", "ww_archer_assists_per_death", "ww_archer_kill_assist_ratio",
+        "ww_engineer_kd_ratio", "ww_engineer_assists_per_death", "ww_engineer_kill_assist_ratio",
+    }
+    
+    # For each metric, load leaderboard and find user's position
+    for metric_key in metrics.keys():
+        try:
+            # Load leaderboard data for this metric
+            is_ratio = metric_key in ratio_metrics
+            
+            if is_ratio:
+                leaderboard_data = _load_ratio_leaderboard_data_from_excel(metric_key, category)
+            else:
+                leaderboard_data = _load_leaderboard_data_from_excel(metric_key, category)
+            
+            # Find user's rank in each period
+            for period in periods:
+                # Skip non-lifetime periods if user is not tracked
+                if period != "lifetime" and not user_is_tracked:
+                    continue
+                
+                period_leaderboard = leaderboard_data.get(period, [])
+                
+                # Find user's position
+                rank = None
+                user_value = None
+                total_players = len(period_leaderboard)
+                
+                for idx, entry in enumerate(period_leaderboard):
+                    player_name = entry[0]
+                    if player_name.lower() == username.lower():
+                        rank = idx + 1
+                        user_value = entry[2]  # The display value
+                        break
+                
+                # Store the ranking
+                if rank is not None:
+                    result[period][metric_key] = (rank, total_players, user_value)
+                    
+        except Exception as e:
+            print(f"[RANKINGS] Error processing metric {metric_key}: {e}")
+            continue
+    
+    return result
+
+
+class RankingsTabView(discord.ui.View):
+    """View for displaying user rankings across all metrics with period tabs."""
+    
+    def __init__(self, username: str, category: str, rankings_data: dict, user_is_tracked: bool):
+        super().__init__()
+        self.username = username
+        self.category = category
+        self.rankings_data = rankings_data
+        self.user_is_tracked = user_is_tracked
+        self.current_period = "lifetime"
+        
+        # Map category to display name
+        self.category_display = {
+            "general": "Wool Games",
+            "sheepwars": "Sheep Wars",
+            "ctw": "Capture the Wool",
+            "ww": "Wool Wars"
+        }.get(category, category.title())
+        
+        # Add buttons conditionally
+        self._add_buttons()
+        
+        # Update button styles
+        self.update_button_styles()
+    
+    def _add_buttons(self):
+        """Add buttons based on whether user is tracked."""
+        # Only add buttons if user is tracked
+        if self.user_is_tracked:
+            self.add_item(discord.ui.Button(
+                label="All-time",
+                custom_id="lifetime",
+                style=discord.ButtonStyle.primary,
+                row=0
+            ))
+            self.add_item(discord.ui.Button(
+                label="Session",
+                custom_id="session",
+                style=discord.ButtonStyle.secondary,
+                row=0
+            ))
+            self.add_item(discord.ui.Button(
+                label="Daily",
+                custom_id="daily",
+                style=discord.ButtonStyle.secondary,
+                row=0
+            ))
+            self.add_item(discord.ui.Button(
+                label="Yesterday",
+                custom_id="yesterday",
+                style=discord.ButtonStyle.secondary,
+                row=0
+            ))
+            self.add_item(discord.ui.Button(
+                label="Weekly",
+                custom_id="weekly",
+                style=discord.ButtonStyle.secondary,
+                row=1
+            ))
+            self.add_item(discord.ui.Button(
+                label="Monthly",
+                custom_id="monthly",
+                style=discord.ButtonStyle.secondary,
+                row=1
+            ))
+    
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Handle button clicks."""
+        if interaction.data and "custom_id" in interaction.data:
+            custom_id = interaction.data["custom_id"]
+            await self._refresh(interaction, custom_id)
+            return True
+        return False
+    
+    def update_button_styles(self):
+        """Update button styles based on current period."""
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                if child.custom_id == self.current_period:
+                    child.style = discord.ButtonStyle.primary
+                else:
+                    child.style = discord.ButtonStyle.secondary
+    
+    def generate_rankings_embed(self):
+        """Generate embed showing all rankings for current period."""
+        period_data = self.rankings_data.get(self.current_period, {})
+        
+        if not period_data:
+            embed = discord.Embed(
+                title=f"🏆 All Rankings for {self.username}",
+                description=f"No {self.current_period} data available for this user.",
+                color=discord.Color.from_rgb(54, 57, 63)
+            )
+            return embed
+        
+        # Create embed
+        embed = discord.Embed(
+            title=f"🏆 All Rankings for {self.username}",
+            description=f"**Category:** {self.category_display} | **Period:** {self.current_period.title()}",
+            color=discord.Color.from_rgb(54, 57, 63)
+        )
+        
+        # Get metric labels
+        metrics = CATEGORY_METRICS.get(self.category, {})
+        
+        # Build ranking lines
+        ranking_lines = []
+        # Define ratio metrics
+        ratio_metrics = {
+            "kdr", "wlr", "wl_ratio", "kd_ratio", "kills_per_game", "kills_per_win",
+            "kills_per_hour", "damage_per_game", "damage_per_sheep", "wools_per_game",
+            "sheeps_per_game", "void_kd_ratio", "explosive_kd_ratio", "bow_kd_ratio",
+            "melee_kd_ratio", "wins_per_hour", "exp_per_hour", "exp_per_game",
+            "survival_rate", "carried_score",
+            # CTW ratios
+            "ctw_wl_ratio", "ctw_kd_ratio", "ctw_kills_per_game", "ctw_deaths_per_game",
+            "ctw_kd_on_woolholder", "ctw_kd_as_woolholder", "ctw_woolholder_kills_per_game",
+            "ctw_woolholder_kills_per_kill", "ctw_wools_captured_per_game", "ctw_wools_captured_per_death",
+            "ctw_gold_earned_per_game", "ctw_gold_spent_per_game", "ctw_wools_stolen_per_game",
+            # WW ratios
+            "ww_wl_ratio", "ww_kd_ratio", "ww_kills_per_game", "ww_assists_per_game",
+            "ww_kill_assist_ratio", "ww_assists_per_death",
+            # WW class-specific ratios
+            "ww_tank_kd_ratio", "ww_tank_assists_per_death", "ww_tank_kill_assist_ratio",
+            "ww_assault_kd_ratio", "ww_assault_assists_per_death", "ww_assault_kill_assist_ratio",
+            "ww_golem_kd_ratio", "ww_golem_assists_per_death", "ww_golem_kill_assist_ratio",
+            "ww_swordsman_kd_ratio", "ww_swordsman_assists_per_death", "ww_swordsman_kill_assist_ratio",
+            "ww_archer_kd_ratio", "ww_archer_assists_per_death", "ww_archer_kill_assist_ratio",
+            "ww_engineer_kd_ratio", "ww_engineer_assists_per_death", "ww_engineer_kill_assist_ratio",
+        }
+        
+        for metric_key, (rank, total, value) in sorted(period_data.items(), key=lambda x: x[1][0]):
+            metric_label = metrics.get(metric_key, metric_key)
+            
+            # Format value based on metric type
+            if "playtime" in metric_key.lower():
+                formatted_value = format_playtime(int(value))
+            elif metric_key in ratio_metrics:
+                # Always show exactly 2 decimal places for ratios
+                formatted_value = f"{float(value):.2f}"
+            else:
+                formatted_value = f"{int(value):,}"
+            
+            ranking_lines.append(f"**{metric_label}:** #{rank:,} ({formatted_value})")
+        
+        # Add all rankings to description (no splitting)
+        embed.description += "\n\n" + "\n".join(ranking_lines)
+        
+        # Add note if user is not tracked
+        if not self.user_is_tracked:
+            embed.set_footer(text=f"{self.username} is not currently tracked. Only all-time stats are available.\nUse `/track ign:{self.username}` to start tracking and enable session/daily/monthly stats.")
+        else:
+            embed.set_footer(text=f"Rankings updated in real-time")
+        
+        return embed
+    
+    async def _refresh(self, interaction: discord.Interaction, new_period: str):
+        """Refresh the view with a new period."""
+        self.current_period = new_period
+        self.update_button_styles()
+        
+        embed = self.generate_rankings_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+# Create rankings command group
+rankings_group = discord.app_commands.Group(name="rankings", description="View all leaderboard positions for a player")
+
+@rankings_group.command(name="general", description="View all general stat rankings for a player")
+@discord.app_commands.describe(ign="Minecraft IGN (optional if you set /default)")
+async def rankings_general(interaction: discord.Interaction, ign: str = None):
+    """General stats rankings."""
+    await _handle_rankings(interaction, "general", ign)
+
+@rankings_group.command(name="sheepwars", description="View all Sheep Wars stat rankings for a player")
+@discord.app_commands.describe(ign="Minecraft IGN (optional if you set /default)")
+async def rankings_sheepwars(interaction: discord.Interaction, ign: str = None):
+    """Sheep Wars stats rankings."""
+    await _handle_rankings(interaction, "sheepwars", ign)
+
+@rankings_group.command(name="ctw", description="View all Capture the Wool stat rankings for a player")
+@discord.app_commands.describe(ign="Minecraft IGN (optional if you set /default)")
+async def rankings_ctw(interaction: discord.Interaction, ign: str = None):
+    """Capture the Wool stats rankings."""
+    await _handle_rankings(interaction, "ctw", ign)
+
+@rankings_group.command(name="ww", description="View all Wool Wars stat rankings for a player")
+@discord.app_commands.describe(ign="Minecraft IGN (optional if you set /default)")
+async def rankings_ww(interaction: discord.Interaction, ign: str = None):
+    """Wool Wars stats rankings."""
+    await _handle_rankings(interaction, "ww", ign)
+
+# Add the rankings group to the bot
+bot.tree.add_command(rankings_group)
+
+async def _handle_rankings(interaction: discord.Interaction, category: str, ign: str = None):
+    """Shared handler for all rankings commands."""
+    # Resolve default IGN if not provided
+    if ign is None or str(ign).strip() == "":
+        default_ign = get_default_user(interaction.user.id)
+        if not default_ign:
+            await interaction.response.send_message("You don't have a default username set. Use /default to set one.", ephemeral=True)
+            return
+        ign = default_ign
+    
+    # Validate username early
+    ok, proper_ign = validate_and_normalize_ign(ign)
+    if not ok:
+        await interaction.response.send_message(f"The username {ign} is invalid.", ephemeral=True)
+        return
+    ign = proper_ign
+    
+    # Defer response
     if not interaction.response.is_done():
         try:
             await interaction.response.defer()
         except (discord.errors.NotFound, discord.errors.HTTPException):
             return
-    wb = None
+    
     try:
-        EXCEL_FILE = "stats.xlsx"
-        if not os.path.exists(EXCEL_FILE):
-            await interaction.followup.send("[ERROR] Excel file not found")
+        # Check if user is tracked
+        user_is_tracked = is_tracked_user(ign)
+        
+        # Check if user exists in database
+        user_exists_in_db = user_exists(ign)
+        
+        # Track if we need to clean up (remove user from DB after calculation)
+        should_cleanup = False
+        
+        # If user doesn't exist in database, fetch from API
+        if not user_exists_in_db:
+            result = await asyncio.to_thread(run_script, "api_get.py", ["-ign", ign])
+            if result.returncode == 0 and result.stdout:
+                try:
+                    json_data = None
+                    for line in reversed(result.stdout.splitlines()):
+                        line = line.strip()
+                        if line.startswith('{') and line.endswith('}'):
+                            try:
+                                json_data = json.loads(line)
+                                break
+                            except json.JSONDecodeError:
+                                continue
+                    
+                    if json_data and "username" in json_data:
+                        ign = json_data["username"]  # Use proper capitalization from API
+                        print(f"[RANKINGS] Fetched stats for untracked user: {ign}")
+                        # Mark for cleanup - we added them temporarily
+                        should_cleanup = True
+                    else:
+                        await interaction.followup.send(f"❌ Could not find stats for user '{ign}' on the API.")
+                        return
+                except Exception as e:
+                    print(f"[RANKINGS] Failed to parse api_get output: {e}")
+                    await interaction.followup.send(f"❌ Could not find stats for user '{ign}'.")
+                    return
+            else:
+                await interaction.followup.send(f"❌ Could not find stats for user '{ign}' on the API.")
+                return
+        
+        # Calculate rankings for all metrics
+        rankings_data = await asyncio.to_thread(_calculate_user_rankings, ign, category)
+        
+        if not rankings_data:
+            await interaction.followup.send(f"❌ Could not find stats for user '{ign}'.")
             return
         
-        # Load data directly from Excel instead of cache
-        processed_data = await asyncio.to_thread(_load_leaderboard_data_from_excel, metric.value)
-        view = LeaderboardView(metric.value, processed_data)
+        # Check if user has any rankings
+        has_data = any(len(period_data) > 0 for period_data in rankings_data.values())
+        if not has_data:
+            await interaction.followup.send(f"❌ No ranking data found for user '{ign}' in category '{category}'.")
+            return
+        
+        # Create view and send
+        view = RankingsTabView(ign, category, rankings_data, user_is_tracked)
+        embed = view.generate_rankings_embed()
+        
+        await interaction.followup.send(embed=embed, view=view)
+        
+        # Clean up: Remove user from database if they were temporarily added
+        if should_cleanup:
+            try:
+                await asyncio.to_thread(delete_user, ign)
+                print(f"[RANKINGS] Cleaned up temporarily added user: {ign}")
+            except Exception as cleanup_error:
+                print(f"[RANKINGS] Failed to cleanup user {ign}: {cleanup_error}")
+        
+    except Exception as e:
+        print(f"[RANKINGS] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        await interaction.followup.send(f"❌ [ERROR] {str(e)}")
+
+
+async def _handle_leaderboard(interaction: discord.Interaction, category: str, metric: str):
+    """Shared handler for all leaderboard commands."""
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            return
+    
+    try:
+        available_metrics = CATEGORY_METRICS.get(category, {})
+        
+        # Validate metric
+        if metric not in available_metrics:
+            metric_list = "\n".join([f"• {k}: {v}" for k, v in available_metrics.items()])
+            await interaction.followup.send(
+                f"❌ Invalid metric '{metric}' for category '{category}'.\n\n"
+                f"**Available metrics:**\n{metric_list}"
+            )
+            return
+        
+        # Determine if this is a ratio metric
+        ratio_metrics = {
+            "kdr", "wlr", "wl_ratio", "kd_ratio", "kills_per_game", "kills_per_win",
+            "kills_per_hour", "damage_per_game", "damage_per_sheep", "wools_per_game",
+            "sheeps_per_game", "void_kd_ratio", "explosive_kd_ratio", "bow_kd_ratio",
+            "melee_kd_ratio", "wins_per_hour", "exp_per_hour", "exp_per_game",
+            "survival_rate", "carried_score",
+            # CTW ratios
+            "ctw_wl_ratio", "ctw_kd_ratio", "ctw_kills_per_game", "ctw_deaths_per_game",
+            "ctw_kd_on_woolholder", "ctw_kd_as_woolholder", "ctw_woolholder_kills_per_game",
+            "ctw_woolholder_kills_per_kill", "ctw_wools_captured_per_game", "ctw_wools_captured_per_death",
+            "ctw_gold_earned_per_game", "ctw_gold_spent_per_game", "ctw_wools_stolen_per_game",
+            # WW ratios
+            "ww_wl_ratio", "ww_kd_ratio", "ww_kills_per_game", "ww_assists_per_game",
+            "ww_kill_assist_ratio", "ww_assists_per_death",
+            # WW class-specific ratios
+            "ww_tank_kd_ratio", "ww_tank_assists_per_death", "ww_tank_kill_assist_ratio",
+            "ww_assault_kd_ratio", "ww_assault_assists_per_death", "ww_assault_kill_assist_ratio",
+            "ww_golem_kd_ratio", "ww_golem_assists_per_death", "ww_golem_kill_assist_ratio",
+            "ww_swordsman_kd_ratio", "ww_swordsman_assists_per_death", "ww_swordsman_kill_assist_ratio",
+            "ww_archer_kd_ratio", "ww_archer_assists_per_death", "ww_archer_kill_assist_ratio",
+            "ww_engineer_kd_ratio", "ww_engineer_assists_per_death", "ww_engineer_kill_assist_ratio",
+        }
+        
+        is_ratio = metric in ratio_metrics
+        
+        # Load data from database
+        if is_ratio:
+            processed_data = await asyncio.to_thread(
+                _load_ratio_leaderboard_data_from_excel, metric, category
+            )
+            view = RatioLeaderboardView(metric, processed_data, category)
+        else:
+            processed_data = await asyncio.to_thread(
+                _load_leaderboard_data_from_excel, metric, category
+            )
+            view = LeaderboardView(metric, processed_data, category)
+        
         embed, file, _ = await asyncio.to_thread(view.generate_leaderboard_image, "lifetime", 0)
         if file:
             await interaction.followup.send(view=view, file=file)
         else:
             await interaction.followup.send(embed=embed, view=view)
     except Exception as e:
-        await interaction.followup.send(f"[ERROR] {str(e)}")
+        await interaction.followup.send(f"❌ [ERROR] {str(e)}")
 
 
-@bot.tree.command(name="kill-leaderboard", description="View kills leaderboard by type")
-@discord.app_commands.describe(metric="Choose which kill type to rank by")
-@discord.app_commands.choices(metric=[
-    discord.app_commands.Choice(name="Total Kills", value="kills"),
-    discord.app_commands.Choice(name="Void Kills", value="kills_void"),
-    discord.app_commands.Choice(name="Explosive Kills", value="kills_explosive"),
-    discord.app_commands.Choice(name="Melee Kills", value="kills_melee"),
-    discord.app_commands.Choice(name="Bow Kills", value="kills_bow"),
-])
-async def kill_leaderboard(interaction: discord.Interaction, metric: discord.app_commands.Choice[str]):
-    if not interaction.response.is_done():
-        try:
-            await interaction.response.defer()
-        except (discord.errors.NotFound, discord.errors.HTTPException):
-            return
-    wb = None
-    try:
-        EXCEL_FILE = "stats.xlsx"
-        if not os.path.exists(EXCEL_FILE):
-            await interaction.followup.send("[ERROR] Excel file not found")
-            return
-        
-        # Load data directly from Excel instead of cache
-        processed_data = await asyncio.to_thread(_load_leaderboard_data_from_excel, metric.value)
-        view = LeaderboardView(metric.value, processed_data)
-        embed, file, _ = await asyncio.to_thread(view.generate_leaderboard_image, "lifetime", 0)
-        if file:
-            await interaction.followup.send(file=file, view=view)
-        else:
-            await interaction.followup.send(embed=embed, view=view)
-    except Exception as e:
-        await interaction.followup.send(f"[ERROR] {str(e)}")
+def calculate_carried_score_average(wins, losses, kills, deaths, games_played):
+    """Calculate average carried score from all 4 formulas.
+    
+    This matches the calculation used in /aretheycarried command.
+    Returns average of all 4 formulas (0-5 scale).
+    """
+    if games_played == 0 or deaths == 0:
+        return 0
+    
+    win_rate = wins / games_played
+    kd_ratio = kills / deaths
+    wl_ratio = wins / losses if losses > 0 else wins
+    kills_per_game = kills / games_played
+    deaths_per_game = deaths / games_played
+    
+    # Formula 1: Win-Performance Disparity
+    normalized_kd_f1 = min(1.0, kd_ratio / 5.0)
+    disparity_f1 = win_rate - normalized_kd_f1
+    baseline_f1 = max(0, 0.3 - (kd_ratio * 0.02))
+    score_formula1 = max(0, min(5, (disparity_f1 * 9) + baseline_f1))
+    
+    # Formula 2: Multi-Factor Weighted
+    kd_factor = max(0, (4.0 - kd_ratio) / 4.0)
+    kills_factor = max(0, (2.0 - kills_per_game) / 2.0)
+    deaths_factor = min(1, deaths_per_game / 1.5)
+    disparity_factor = max(0, win_rate - (kd_ratio / 5))
+    
+    score_formula2 = (
+        kd_factor * 1.3 +
+        kills_factor * 1.0 +
+        deaths_factor * 0.4 +
+        disparity_factor * 2.0
+    )
+    score_formula2 = max(0, min(5, score_formula2 * 0.9))
+    
+    # Formula 3: Ratio-Based
+    if losses > 0 and kd_ratio > 0:
+        ratio_gap = wl_ratio / kd_ratio
+        score_formula3 = max(0, min(5, (ratio_gap - 0.6) * 2.2))
+    else:
+        score_formula3 = 0
+    
+    # Formula 4: Impact Score
+    impact_score = (
+        (min(5, kd_ratio) / 5) * 0.65 +
+        (min(2.5, kills_per_game) / 2.5) * 0.35
+    )
+    performance_gap = win_rate - impact_score
+    baseline_f4 = 0.15
+    score_formula4 = max(0, min(5, (performance_gap * 8) + baseline_f4))
+    
+    # Return average of all 4 formulas
+    avg_score = (score_formula1 + score_formula2 + score_formula3 + score_formula4) / 4
+    return round(avg_score, 2)
 
 
-@bot.tree.command(name="death-leaderboard", description="View deaths leaderboard by type")
-@discord.app_commands.describe(metric="Choose which death type to rank by")
-@discord.app_commands.choices(metric=[
-    discord.app_commands.Choice(name="Total Deaths", value="deaths"),
-    discord.app_commands.Choice(name="Void Deaths", value="deaths_void"),
-    discord.app_commands.Choice(name="Explosive Deaths", value="deaths_explosive"),
-    discord.app_commands.Choice(name="Melee Deaths", value="deaths_melee"),
-    discord.app_commands.Choice(name="Bow Deaths", value="deaths_bow"),
-])
-async def death_leaderboard(interaction: discord.Interaction, metric: discord.app_commands.Choice[str]):
-    if not interaction.response.is_done():
-        try:
-            await interaction.response.defer()
-        except (discord.errors.NotFound, discord.errors.HTTPException):
-            return
-    wb = None
-    try:
-        EXCEL_FILE = "stats.xlsx"
-        if not os.path.exists(EXCEL_FILE):
-            await interaction.followup.send("[ERROR] Excel file not found")
-            return
-        
-        # Load data directly from Excel instead of cache
-        processed_data = await asyncio.to_thread(_load_leaderboard_data_from_excel, metric.value)
-        view = LeaderboardView(metric.value, processed_data)
-        embed, file, _ = await asyncio.to_thread(view.generate_leaderboard_image, "lifetime", 0)
-        if file:
-            await interaction.followup.send(file=file, view=view)
-        else:
-            await interaction.followup.send(embed=embed, view=view)
-    except Exception as e:
-        await interaction.followup.send(f"[ERROR] {str(e)}")
 
-
-@bot.tree.command(name="ratio-leaderboard", description="View ratio-based leaderboard")
-@discord.app_commands.describe(metric="Choose which ratio to rank by")
-@discord.app_commands.choices(metric=[
-    discord.app_commands.Choice(name="Win/Loss", value="wl_ratio"),
-    discord.app_commands.Choice(name="Kill/Death", value="kd_ratio"),
-    discord.app_commands.Choice(name="Kill/Game", value="kills_per_game"),
-    discord.app_commands.Choice(name="Kill/Win", value="kills_per_win"),
-    discord.app_commands.Choice(name="Kill/Hour", value="kills_per_hour"),
-    discord.app_commands.Choice(name="Damage/Game", value="damage_per_game"),
-    discord.app_commands.Choice(name="Damage/Sheep", value="damage_per_sheep"),
-    discord.app_commands.Choice(name="Wools/Game", value="wools_per_game"),
-    discord.app_commands.Choice(name="Sheeps/Game", value="sheeps_per_game"),
-    discord.app_commands.Choice(name="Void Kill/Death", value="void_kd_ratio"),
-    discord.app_commands.Choice(name="Explosive Kill/Death", value="explosive_kd_ratio"),
-    discord.app_commands.Choice(name="Bow Kill/Death", value="bow_kd_ratio"),
-    discord.app_commands.Choice(name="Melee Kill/Death", value="melee_kd_ratio"),
-    discord.app_commands.Choice(name="Wins/Hour", value="wins_per_hour"),
-    discord.app_commands.Choice(name="EXP/Hour", value="exp_per_hour"),
-    discord.app_commands.Choice(name="EXP/Game", value="exp_per_game"),
-    discord.app_commands.Choice(name="Survival Rate", value="survival_rate"),
-])
-async def ratio_leaderboard(interaction: discord.Interaction, metric: discord.app_commands.Choice[str]):
-    if not interaction.response.is_done():
-        try:
-            await interaction.response.defer()
-        except (discord.errors.NotFound, discord.errors.HTTPException):
-            return
-    wb = None
-    try:
-        EXCEL_FILE = "stats.xlsx"
-        if not os.path.exists(EXCEL_FILE):
-            await interaction.followup.send("[ERROR] Excel file not found")
-            return
-        
-        # Load data directly from Excel instead of cache
-        processed_data = await asyncio.to_thread(_load_ratio_leaderboard_data_from_excel, metric.value)
-        view = RatioLeaderboardView(metric.value, processed_data)
-        embed, file, _ = await asyncio.to_thread(view.generate_leaderboard_image, "lifetime", 0)
-        if file:
-            await interaction.followup.send(file=file, view=view)
-        else:
-            await interaction.followup.send(embed=embed, view=view)
-    except Exception as e:
-        await interaction.followup.send(f"[ERROR] {str(e)}")
 
 
 @bot.tree.command(name="prestiges", description="List all prestige prefixes with their colors")
@@ -6306,6 +7792,275 @@ async def prestiges(interaction: discord.Interaction):
     except Exception as e:
         await interaction.followup.send(f"[ERROR] {str(e)}")
 
+class CarriedView(discord.ui.View):
+    def __init__(self, ign: str, stats_data: dict):
+        super().__init__()
+        self.ign = ign
+        self.stats_data = stats_data
+        self.current_tab = "lifetime"
+        self.update_buttons()
+    
+    def update_buttons(self):
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.style = discord.ButtonStyle.primary if child.custom_id == self.current_tab else discord.ButtonStyle.secondary
+    
+    def calculate_carried_scores(self, tab_name: str):
+        """Calculate all 4 carried scores for a given time period."""
+        # Extract stats for the specified period
+        wins = self.stats_data.get('wins', {}).get(tab_name, 0)
+        losses = self.stats_data.get('losses', {}).get(tab_name, 0)
+        kills = self.stats_data.get('kills', {}).get(tab_name, 0)
+        deaths = self.stats_data.get('deaths', {}).get(tab_name, 0)
+        games_played = self.stats_data.get('games_played', {}).get(tab_name, 0)
+        
+        if games_played == 0 or deaths == 0:
+            return None
+        
+        # Calculate derived stats
+        win_rate = (wins / games_played * 100) if games_played > 0 else 0
+        kd_ratio = kills / deaths if deaths > 0 else kills
+        wl_ratio = wins / losses if losses > 0 else wins
+        kills_per_game = kills / games_played if games_played > 0 else 0
+        
+        # Formula 1: Win-Performance Disparity
+        normalized_kd_f1 = min(1.0, kd_ratio / 5.0)
+        disparity_f1 = (win_rate/100) - normalized_kd_f1
+        baseline_f1 = max(0, 0.3 - (kd_ratio * 0.02))
+        score_formula1 = max(0, min(5, (disparity_f1 * 9) + baseline_f1))
+        score_formula1 = round(score_formula1, 1)
+        
+        # Formula 2: Multi-Factor Weighted (Used for assessment)
+        kd_factor = max(0, (4.0 - kd_ratio) / 4.0)
+        kills_factor = max(0, (2.0 - kills_per_game) / 2.0)
+        deaths_per_game = deaths / games_played
+        deaths_factor = min(1, deaths_per_game / 1.5)
+        disparity_factor = max(0, (win_rate/100) - (kd_ratio / 5))
+        
+        score_formula2 = (
+            kd_factor * 1.3 +
+            kills_factor * 1.0 +
+            deaths_factor * 0.4 +
+            disparity_factor * 2.0
+        )
+        score_formula2 = max(0, min(5, score_formula2 * 0.9))
+        score_formula2 = round(score_formula2, 1)
+        
+        # Formula 3: Ratio-Based
+        if losses > 0 and deaths > 0:
+            ratio_gap = wl_ratio / kd_ratio
+            score_formula3 = max(0, min(5, (ratio_gap - 0.6) * 2.2))
+        else:
+            score_formula3 = 0
+        score_formula3 = round(score_formula3, 1)
+        
+        # Formula 4: Impact Score
+        impact_score = (
+            (min(5, kd_ratio) / 5) * 0.65 +
+            (min(2.5, kills_per_game) / 2.5) * 0.35
+        )
+        performance_gap = (win_rate/100) - impact_score
+        baseline_f4 = 0.15
+        score_formula4 = max(0, min(5, (performance_gap * 8) + baseline_f4))
+        score_formula4 = round(score_formula4, 1)
+        
+        # Calculate average of all 4 formulas
+        avg_score = round((score_formula1 + score_formula2 + score_formula3 + score_formula4) / 4, 1)
+        
+        return {
+            'formula1': score_formula1,
+            'formula2': score_formula2,
+            'formula3': score_formula3,
+            'formula4': score_formula4,
+            'assessment_score': avg_score,  # Use average for assessment
+            'wins': int(wins),
+            'losses': int(losses),
+            'kills': int(kills),
+            'deaths': int(deaths),
+            'games': int(games_played),
+            'win_rate': win_rate,
+            'wl_ratio': wl_ratio,
+            'kd_ratio': kd_ratio,
+            'kills_per_game': kills_per_game
+        }
+    
+    def generate_embed(self, tab_name: str):
+        """Generate the embed for a specific time period."""
+        scores = self.calculate_carried_scores(tab_name)
+        
+        if scores is None:
+            embed = discord.Embed(
+                title=f"Are they carried? - {self.ign}",
+                description=f"Insufficient data for {tab_name} period.",
+                color=0x808080
+            )
+            return embed
+        
+        # Determine assessment based on Formula 2 only
+        assessment_score = scores['assessment_score']
+        
+        if assessment_score >= 4.5:
+            assessment = "Definitely carried"
+            color = 0xFF0000  # Red
+        elif assessment_score >= 3.5:
+            assessment = "Most likely carried"
+            color = 0xFF6600  # Orange-red
+        elif assessment_score >= 2.5:
+            assessment = "Carried"
+            color = 0xFF9900  # Orange
+        elif assessment_score >= 1.5:
+            assessment = "Slightly carried"
+            color = 0xFFCC00  # Yellow-orange
+        elif assessment_score >= 0.5:
+            assessment = "Not carried"
+            color = 0x99FF00  # Yellow-green
+        else:
+            assessment = "Definitely not carried"
+            color = 0x00FF00  # Green
+        
+        # Create embed
+        tab_display = "All-time" if tab_name == "lifetime" else tab_name.title()
+        embed = discord.Embed(
+            title=f"Are they carried? - {self.ign}",
+            description=f"**Period:** {tab_display}",
+            color=color
+        )
+        
+        # Add calculated rate field (Average of all 4 formulas)
+        embed.add_field(
+            name="Calculated Rate",
+            value=f"{assessment_score:.1f}",
+            inline=False
+        )
+        
+        # Add assessment field
+        embed.add_field(
+            name="Assessment",
+            value=assessment,
+            inline=False
+        )
+        
+        # Add stats used
+        stats_text = (
+            f"**Games Played:** {scores['games']:,}\n"
+            f"**Wins:** {scores['wins']:,} | **Losses:** {scores['losses']:,}\n"
+            f"**Win Rate:** {scores['win_rate']:.1f}% | **W/L Ratio:** {scores['wl_ratio']:.2f}\n"
+            f"**Kills:** {scores['kills']:,} | **Deaths:** {scores['deaths']:,}\n"
+            f"**K/D Ratio:** {scores['kd_ratio']:.2f} | **Kills/Game:** {scores['kills_per_game']:.2f}"
+        )
+        embed.add_field(
+            name="Stats Used",
+            value=stats_text,
+            inline=False
+        )
+        
+        # Add all formula scores
+        formula_text = (
+            f"**Formula 1 (Win-Performance Disparity):** {scores['formula1']:.1f}\n"
+            f"**Formula 2 (Multi-Factor Weighted):** {scores['formula2']:.1f}\n"
+            f"**Formula 3 (Ratio-Based):** {scores['formula3']:.1f}\n"
+            f"**Formula 4 (Impact Score):** {scores['formula4']:.1f}\n"
+            f"**Average:** {scores['assessment_score']:.1f}"
+        )
+        embed.add_field(
+            name="Formula Breakdown",
+            value=formula_text,
+            inline=False
+        )
+        
+        # Add footer with timestamp
+        embed.set_footer(text=f"Data from Hypixel API • Calculated at {time.strftime('%H:%M', time.localtime())}")
+        
+        return embed
+    
+    async def handle_tab_click(self, interaction: discord.Interaction, tab_name: str):
+        self.current_tab = tab_name
+        self.update_buttons()
+        embed = self.generate_embed(tab_name)
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    @discord.ui.button(label="All-time", custom_id="lifetime")
+    async def all_time(self, interaction, button):
+        await self.handle_tab_click(interaction, "lifetime")
+    
+    @discord.ui.button(label="Session", custom_id="session")
+    async def session(self, interaction, button):
+        await self.handle_tab_click(interaction, "session")
+    
+    @discord.ui.button(label="Daily", custom_id="daily")
+    async def daily(self, interaction, button):
+        await self.handle_tab_click(interaction, "daily")
+    
+    @discord.ui.button(label="Yesterday", custom_id="yesterday")
+    async def yesterday(self, interaction, button):
+        await self.handle_tab_click(interaction, "yesterday")
+    
+    @discord.ui.button(label="Weekly", custom_id="weekly")
+    async def weekly(self, interaction, button):
+        await self.handle_tab_click(interaction, "weekly")
+    
+    @discord.ui.button(label="Monthly", custom_id="monthly")
+    async def monthly(self, interaction, button):
+        await self.handle_tab_click(interaction, "monthly")
+
+
+@bot.tree.command(name="aretheycarried", description="Calculate how 'carried' a player is based on their stats")
+@discord.app_commands.describe(ign="Minecraft IGN (required)")
+async def aretheycarried(interaction: discord.Interaction, ign: str):
+    print(f"[DEBUG] /aretheycarried triggered for IGN: {ign} by user: {interaction.user.name}")
+    
+    # Validate username
+    ok, proper_ign = validate_and_normalize_ign(ign)
+    if not ok:
+        await interaction.response.send_message(f"The username {ign} is invalid.", ephemeral=True)
+        return
+    ign = proper_ign
+    
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except (discord.errors.NotFound, discord.errors.HTTPException) as e:
+            print(f"[DEBUG] Defer failed for {ign} in /aretheycarried: {e}")
+            return
+
+    try:
+        # Fetch fresh stats
+        print(f"[DEBUG] Running api_get.py for IGN: {ign} (/aretheycarried)")
+        result = run_script("api_get.py", ["-ign", ign])
+        
+        if result.returncode != 0:
+            error_msg = result.stderr or result.stdout or "Unknown error"
+            await interaction.followup.send(f"[ERROR] Failed to fetch stats:\n```{error_msg[:500]}```")
+            return
+
+        # Get stats from database with calculated deltas
+        stats = get_user_stats_with_deltas(ign)
+        
+        if not stats:
+            await interaction.followup.send(f"[ERROR] No stats found for player '{ign}'")
+            return
+        
+        # Check if user is tracked
+        tracked_users = load_tracked_users()
+        is_tracked = any(u.casefold() == ign.casefold() for u in tracked_users)
+        
+        # Create view with tabs
+        view = CarriedView(ign, stats)
+        embed = view.generate_embed("lifetime")
+        
+        if is_tracked:
+            await interaction.followup.send(embed=embed, view=view)
+        else:
+            message = f"{ign} is not currently tracked. Only all-time stats are available.\nUse `/track ign:{ign}` to start tracking and enable session/daily/monthly stats."
+            await interaction.followup.send(content=message, embed=embed)
+        
+    except Exception as e:
+        print(f"[ERROR] Exception in /aretheycarried: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        await interaction.followup.send(f"[ERROR] {str(e)}")
+
+
 @bot.tree.command(name="stopbot", description="Gracefully shutdown the bot (admin only)")
 async def stopbot(interaction: discord.Interaction):
     if not is_admin(interaction.user):
@@ -6341,4 +8096,95 @@ async def stopbot(interaction: discord.Interaction):
 
 # Run bot
 if __name__ == "__main__":
-    bot.run(DISCORD_TOKEN) 
+    # Prevent multiple instances with a lock file
+    import fcntl
+    lock_file = BOT_DIR / "bot.lock"
+    
+    try:
+        # Try to acquire exclusive lock
+        lock_fp = open(lock_file, 'w')
+        fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        
+        # Write PID to lock file
+        lock_fp.write(str(os.getpid()))
+        lock_fp.flush()
+        
+        print(f"[STARTUP] Bot starting with PID {os.getpid()}")
+        print(f"[STARTUP] Lock file created at {lock_file}")
+        
+        try:
+            bot.run(DISCORD_TOKEN)
+        finally:
+            # Clean up lock file on exit
+            try:
+                fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
+                lock_fp.close()
+                if lock_file.exists():
+                    lock_file.unlink()
+                print("[SHUTDOWN] Lock file removed")
+            except:
+                pass
+                
+    except IOError:
+        # Lock file exists - check if process is actually running
+        print(f"[WARNING] Lock file exists at {lock_file}")
+        stale_lock = False
+        
+        try:
+            with open(lock_file, 'r') as f:
+                existing_pid = f.read().strip()
+                
+            if existing_pid.isdigit():
+                existing_pid = int(existing_pid)
+                # Check if process with that PID exists
+                try:
+                    os.kill(existing_pid, 0)  # Signal 0 just checks if process exists
+                    # Process exists - real duplicate instance
+                    print(f"[ERROR] Another instance of the bot is already running!")
+                    print(f"[ERROR] Existing process PID: {existing_pid}")
+                    print(f"[ERROR] Use 'systemctl stop sheepbot' or 'kill {existing_pid}' to stop it")
+                    sys.exit(1)
+                except OSError:
+                    # Process doesn't exist - stale lock file
+                    stale_lock = True
+                    print(f"[INFO] Found stale lock file from PID {existing_pid} (process not running)")
+            else:
+                stale_lock = True
+                print("[INFO] Lock file contains invalid PID")
+                
+        except (FileNotFoundError, ValueError):
+            stale_lock = True
+            print("[INFO] Lock file is empty or unreadable")
+        
+        # If lock is stale, remove it and retry
+        if stale_lock:
+            print("[INFO] Removing stale lock file and starting bot...")
+            try:
+                lock_file.unlink()
+            except:
+                pass
+            
+            # Retry acquiring lock
+            try:
+                lock_fp = open(lock_file, 'w')
+                fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                lock_fp.write(str(os.getpid()))
+                lock_fp.flush()
+                
+                print(f"[STARTUP] Bot starting with PID {os.getpid()}")
+                print(f"[STARTUP] Lock file created at {lock_file}")
+                
+                try:
+                    bot.run(DISCORD_TOKEN)
+                finally:
+                    try:
+                        fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
+                        lock_fp.close()
+                        if lock_file.exists():
+                            lock_file.unlink()
+                        print("[SHUTDOWN] Lock file removed")
+                    except:
+                        pass
+            except IOError:
+                print("[ERROR] Failed to acquire lock even after removing stale lock file")
+                sys.exit(1) 

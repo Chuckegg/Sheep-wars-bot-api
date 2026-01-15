@@ -5,7 +5,7 @@ import argparse
 from pathlib import Path
 
 # Import database helper
-from db_helper import rotate_daily_to_yesterday, get_tracked_users
+from db_helper import rotate_daily_to_yesterday, reset_weekly_snapshots, get_tracked_users
 
 SCRIPT_DIR = Path(__file__).parent.absolute()
 # TRACKED_FILE = str(SCRIPT_DIR / "tracked_users.txt")  # Now using database
@@ -46,7 +46,7 @@ def batch_update(schedule: str, api_key: str | None = None) -> dict:
     """Update all tracked users with appropriate snapshots.
     
     Args:
-        schedule: One of 'session', 'daily', 'yesterday', 'monthly', 'all', or 'all-session'
+        schedule: One of 'session', 'daily', 'yesterday', 'weekly', 'monthly', 'all', or 'all-session'
         api_key: Optional Hypixel API key; falls back to env var or hardcoded default
     
     Returns:
@@ -59,6 +59,14 @@ def batch_update(schedule: str, api_key: str | None = None) -> dict:
         results = rotate_daily_to_yesterday(users)
         # Return results in the expected format
         return {username: (success, ['rotate']) for username, success in results.items()}
+    
+    # Special handling for 'weekly' schedule - reset weekly snapshots to current lifetime
+    if schedule == 'weekly':
+        print("[INFO] Running weekly reset (setting weekly snapshots to current lifetime)", flush=True)
+        users = load_tracked_users()
+        results = reset_weekly_snapshots(users)
+        # Return results in the expected format
+        return {username: (success, ['weekly_reset']) for username, success in results.items()}
     
     users = load_tracked_users()
     if not users:
@@ -107,7 +115,7 @@ def batch_update(schedule: str, api_key: str | None = None) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description="Batch update tracked users with API snapshots")
-    parser.add_argument("-schedule", choices=["session", "daily", "yesterday", "monthly", "all", "all-session"], default="all",
+    parser.add_argument("-schedule", choices=["session", "daily", "yesterday", "weekly", "monthly", "all", "all-session"], default="all",
                         help="Which snapshots to take")
     parser.add_argument("-key", "--api-key", help="Hypixel API key (optional, uses env or default)")
     args = parser.parse_args()

@@ -10,7 +10,8 @@ from db_helper import (
     init_database,
     update_user_stats,
     update_user_meta,
-    get_user_stats_with_deltas
+    get_user_stats_with_deltas,
+    user_exists
 )
 
 SCRIPT_DIR = Path(__file__).parent.absolute()
@@ -175,51 +176,83 @@ def extract_player_rank(player_json: Dict) -> Optional[str]:
     return None
 
 
-def extract_wool_games_flat(player_json: Dict) -> Dict:
-    """Extract Wool Games data and flatten into a single stats dict.
-    Includes progression.available_layers/experience, coins, sheep_wars.stats*, and playtime.
+def extract_wool_games_all(player_json: Dict) -> Dict:
+    """Extract ALL Wool Games data including general, sheep wars, CTW, and WW stats.
+    
+    Returns dict with stats using these prefixes:
+    - No prefix: general stats (level, experience, coins, playtime, available_layers)
+    - No prefix: sheep wars stats (kills, deaths, wins, etc.)
+    - ctw_: Capture the Wool stats
+    - ww_: Wool Wars stats (including class-specific with ww_classname_stat format)
     """
     player = player_json.get("player", {}) if isinstance(player_json, dict) else {}
     stats_root = player.get("stats", {}) if isinstance(player, dict) else {}
+    
     # Try common wool keys
-    wool_keys = ["WOOL_GAMES", "Wool_Games", "WoolGames", "WoolWars"]
+    wool_keys = ["WoolGames", "WOOL_GAMES", "Wool_Games", "WoolWars"]
     wool = None
     for k in wool_keys:
         if k in stats_root:
             wool = stats_root[k]
             break
+    
     if not isinstance(wool, dict):
         return {}
 
     flat: Dict[str, float] = {}
 
-    # progression fields
+    # ===== GENERAL STATS =====
     progression = wool.get("progression")
     if isinstance(progression, dict):
         if "available_layers" in progression:
-            flat["available_layers"] = progression.get("available_layers")
+            flat["available_layers"] = progression.get("available_layers", 0)
         if "experience" in progression:
             exp_val = progression.get("experience") or 0
             flat["experience"] = exp_val
-            # Derive wool games level from experience with prestige scaling
             try:
                 flat["level"] = experience_to_level(exp_val)
             except Exception:
                 flat["level"] = 0
 
-    # coins
     if "coins" in wool:
-        flat["coins"] = wool.get("coins")
+        flat["coins"] = wool.get("coins", 0)
+    if "playtime" in wool:
+        flat["playtime"] = wool.get("playtime", 0)
 
-    # sheep_wars stats
+    # ===== SHEEP WARS STATS =====
     sheep_stats = (wool.get("sheep_wars", {}) or {}).get("stats")
     if isinstance(sheep_stats, dict):
         for k, v in sheep_stats.items():
-            flat[k] = v
+            if isinstance(v, (int, float)):
+                flat[k] = v
 
-    # playtime
-    if "playtime" in wool:
-        flat["playtime"] = wool.get("playtime")
+    # ===== CAPTURE THE WOOL STATS =====
+    ctw_stats = (wool.get("capture_the_wool", {}) or {}).get("stats")
+    if isinstance(ctw_stats, dict):
+        for k, v in ctw_stats.items():
+            if isinstance(v, (int, float)):
+                flat[f"ctw_{k}"] = v
+
+    # ===== WOOL WARS STATS =====
+    ww_data = wool.get("wool_wars", {}) or {}
+    ww_stats = ww_data.get("stats") if isinstance(ww_data, dict) else {}
+    
+    if isinstance(ww_stats, dict):
+        # Top-level WW stats
+        for k, v in ww_stats.items():
+            if k == "classes":
+                continue
+            if isinstance(v, (int, float)):
+                flat[f"ww_{k}"] = v
+        
+        # Class-specific stats
+        classes = ww_stats.get("classes", {})
+        if isinstance(classes, dict):
+            for class_name, class_stats in classes.items():
+                if isinstance(class_stats, dict):
+                    for stat_name, stat_value in class_stats.items():
+                        if isinstance(stat_value, (int, float)):
+                            flat[f"ww_{class_name}_{stat_name}"] = stat_value
 
     return flat
 
@@ -359,9 +392,9 @@ def api_update_database(username: str, api_key: str, snapshot_sections: set[str]
             }
     
     # Extract Wool Games stats
-    current = extract_wool_games_flat(data)
+    current = extract_wool_games_all(data)
     if not current:
-        raise RuntimeError(f"No Wool Games -> Sheep Wars stats for {proper_username}")
+        raise RuntimeError(f"No Wool Games stats for {proper_username}")
 
     print(f"[API] Extracted {len(current)} stats for {proper_username}")
 
@@ -392,9 +425,31 @@ def api_update_database(username: str, api_key: str, snapshot_sections: set[str]
     print(f"[DEBUG] Extracted rank for {proper_username}: {rank}")
     save_user_color_and_rank(proper_username, rank, guild_tag, guild_color)
 
+    # Determine which stat categories are NEW for this user
+    new_stat_categories = set()
+    if user_exists(proper_username):
+        # Get existing stats to see what categories we already have
+        existing_stats = get_user_stats_with_deltas(proper_username)
+        
+        # Check if user has any existing CTW or WW stats
+        has_ctw = any(stat.startswith('ctw_') for stat in existing_stats.keys())
+        has_ww = any(stat.startswith('ww_') for stat in existing_stats.keys())
+        
+        # If we're adding CTW/WW stats for the first time, mark as new
+        has_ctw_now = any(k.startswith('ctw_') for k in current.keys())
+        has_ww_now = any(k.startswith('ww_') for k in current.keys())
+        
+        if not has_ctw and has_ctw_now:
+            new_stat_categories.add('ctw')
+            print(f"[DB] First time adding CTW stats for {proper_username}")
+        
+        if not has_ww and has_ww_now:
+            new_stat_categories.add('ww')
+            print(f"[DB] First time adding WW stats for {proper_username}")
+
     # Update database with stats
     print(f"[DB] Updating stats for {proper_username}")
-    update_user_stats(proper_username, current, snapshot_sections)
+    update_user_stats(proper_username, current, snapshot_sections, new_stat_categories)
     
     # Update metadata
     level = int(current.get('level', 0))

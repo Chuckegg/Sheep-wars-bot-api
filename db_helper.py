@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Database helper module for stats.db SQLite database operations.
-Provides a centralized interface for all database operations.
+Updated to support categorized stat tables (general_stats, sheep_stats, ctw_stats, ww_stats).
 """
 
 import sqlite3
@@ -12,6 +12,54 @@ from contextlib import contextmanager
 
 
 DB_FILE = Path(__file__).parent / "stats.db"
+
+# Define which stats belong to which category
+GENERAL_STATS = {'available_layers', 'experience', 'coins', 'playtime', 'level'}
+SHEEP_STATS = {
+    'sheep_thrown', 'wins', 'games_played', 'deaths', 'damage_dealt',
+    'kills', 'losses', 'deaths_explosive', 'magic_wool_hit', 'kills_void',
+    'deaths_void', 'deaths_bow', 'kills_explosive', 'kills_bow',
+    'kills_melee', 'deaths_melee'
+}
+CTW_STATS = {
+    'ctw_deaths', 'ctw_kills', 'ctw_assists', 'ctw_gold_spent', 'ctw_kills_on_woolholder',
+    'ctw_experienced_wins', 'ctw_experienced_losses', 'ctw_fastest_win', 'ctw_wools_stolen',
+    'ctw_longest_game', 'ctw_participated_wins', 'ctw_most_kills_and_assists', 'ctw_gold_earned',
+    'ctw_participated_losses', 'ctw_most_gold_earned', 'ctw_deaths_to_woolholder',
+    'ctw_kills_with_wool', 'ctw_deaths_with_wool', 'ctw_fastest_wool_capture', 'ctw_wools_captured'
+}
+WW_STATS = {
+    'ww_assists', 'ww_blocks_broken', 'ww_deaths', 'ww_games_played',
+    'ww_kills', 'ww_powerups_gotten', 'ww_wool_placed', 'ww_wins',
+    # Class-specific stats
+    'ww_engineer_blocks_broken', 'ww_engineer_deaths', 'ww_engineer_wool_placed',
+    'ww_engineer_powerups_gotten', 'ww_engineer_kills', 'ww_engineer_assists',
+    'ww_tank_assists', 'ww_tank_blocks_broken', 'ww_tank_deaths',
+    'ww_tank_kills', 'ww_tank_powerups_gotten', 'ww_tank_wool_placed',
+    'ww_assault_blocks_broken', 'ww_assault_deaths', 'ww_assault_powerups_gotten',
+    'ww_assault_wool_placed', 'ww_assault_assists', 'ww_assault_kills',
+    'ww_golem_assists', 'ww_golem_blocks_broken', 'ww_golem_deaths',
+    'ww_golem_kills', 'ww_golem_powerups_gotten', 'ww_golem_wool_placed',
+    'ww_archer_deaths', 'ww_archer_powerups_gotten', 'ww_archer_assists',
+    'ww_archer_kills', 'ww_archer_wool_placed', 'ww_archer_blocks_broken',
+    'ww_swordsman_deaths', 'ww_swordsman_powerups_gotten', 'ww_swordsman_kills',
+    'ww_swordsman_assists', 'ww_swordsman_blocks_broken', 'ww_swordsman_wool_placed'
+}
+
+
+def get_stat_table(stat_name: str) -> str:
+    """Determine which table a stat belongs to."""
+    if stat_name in GENERAL_STATS:
+        return 'general_stats'
+    elif stat_name in SHEEP_STATS:
+        return 'sheep_stats'
+    elif stat_name.startswith('ctw_') or stat_name in CTW_STATS:
+        return 'ctw_stats'
+    elif stat_name.startswith('ww_') or stat_name in WW_STATS:
+        return 'ww_stats'
+    else:
+        # Default to sheep_stats for backward compatibility
+        return 'sheep_stats'
 
 
 @contextmanager
@@ -42,19 +90,27 @@ def init_database(db_path: Optional[Path] = None):
     with get_db_connection(db_path) as conn:
         cursor = conn.cursor()
         
-        # User stats table - stores all stat values for each user
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS user_stats (
-                username TEXT NOT NULL,
-                stat_name TEXT NOT NULL,
-                lifetime REAL DEFAULT 0,
-                session REAL DEFAULT 0,
-                daily REAL DEFAULT 0,
-                yesterday REAL DEFAULT 0,
-                monthly REAL DEFAULT 0,
-                PRIMARY KEY (username, stat_name)
-            )
-        ''')
+        # Create categorized stat tables
+        tables = ['general_stats', 'sheep_stats', 'ctw_stats', 'ww_stats']
+        
+        for table in tables:
+            cursor.execute(f'''
+                CREATE TABLE IF NOT EXISTS {table} (
+                    username TEXT NOT NULL,
+                    stat_name TEXT NOT NULL,
+                    lifetime REAL DEFAULT 0,
+                    session REAL DEFAULT 0,
+                    daily REAL DEFAULT 0,
+                    yesterday REAL DEFAULT 0,
+                    weekly REAL DEFAULT 0,
+                    monthly REAL DEFAULT 0,
+                    PRIMARY KEY (username, stat_name)
+                )
+            ''')
+            
+            # Create indexes for faster lookups
+            cursor.execute(f'CREATE INDEX IF NOT EXISTS idx_{table}_username ON {table}(username)')
+            cursor.execute(f'CREATE INDEX IF NOT EXISTS idx_{table}_stat_name ON {table}(stat_name)')
         
         # User metadata table - stores level, icon, colors, etc.
         cursor.execute('''
@@ -64,17 +120,10 @@ def init_database(db_path: Optional[Path] = None):
                 icon TEXT DEFAULT '',
                 ign_color TEXT DEFAULT NULL,
                 guild_tag TEXT DEFAULT NULL,
-                guild_hex TEXT DEFAULT NULL
+                guild_hex TEXT DEFAULT NULL,
+                rank TEXT DEFAULT NULL
             )
         ''')
-
-        # Migration: Check if 'rank' column exists in user_meta
-        cursor.execute("PRAGMA table_info(user_meta)")
-        columns = [info['name'] for info in cursor.fetchall()]
-        if 'rank' not in columns:
-            print("[DB] Adding 'rank' column to user_meta table...")
-            cursor.execute("ALTER TABLE user_meta ADD COLUMN rank TEXT DEFAULT NULL")
-            conn.commit()
         
         # User links table - maps usernames to Discord IDs
         cursor.execute('''
@@ -113,9 +162,7 @@ def init_database(db_path: Optional[Path] = None):
             )
         ''')
         
-        # Create indexes for faster lookups
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_username ON user_stats(username)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_stat_name ON user_stats(stat_name)')
+        # Create indexes for other tables
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_discord_id ON user_links(discord_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_default_discord ON default_users(discord_id)')
         
@@ -130,12 +177,23 @@ def get_all_usernames() -> List[str]:
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT DISTINCT username FROM user_stats ORDER BY username')
+        # Get usernames from any of the stat tables
+        cursor.execute('''
+            SELECT DISTINCT username FROM (
+                SELECT username FROM general_stats
+                UNION
+                SELECT username FROM sheep_stats
+                UNION
+                SELECT username FROM ctw_stats
+                UNION
+                SELECT username FROM ww_stats
+            ) ORDER BY username
+        ''')
         return [row[0] for row in cursor.fetchall()]
 
 
 def get_user_stats(username: str) -> Dict[str, Dict[str, float]]:
-    """Get all stats for a specific user.
+    """Get all stats for a specific user across all tables.
     
     Args:
         username: Username to query
@@ -146,32 +204,38 @@ def get_user_stats(username: str) -> Dict[str, Dict[str, float]]:
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('''
-            SELECT stat_name, lifetime, session, daily, yesterday, monthly
-            FROM user_stats
-            WHERE LOWER(username) = LOWER(?)
-        ''', (username,))
         
         stats = {}
-        for row in cursor.fetchall():
-            stats[row[0]] = {
-                'lifetime': row[1],
-                'session': row[2],
-                'daily': row[3],
-                'yesterday': row[4],
-                'monthly': row[5]
-            }
+        tables = ['general_stats', 'sheep_stats', 'ctw_stats', 'ww_stats']
+        
+        for table in tables:
+            cursor.execute(f'''
+                SELECT stat_name, lifetime, session, daily, yesterday, weekly, monthly
+                FROM {table}
+                WHERE username = ?
+            ''', (username,))
+            
+            for row in cursor.fetchall():
+                stats[row[0]] = {
+                    'lifetime': row[1] or 0,
+                    'session': row[2] or 0,
+                    'daily': row[3] or 0,
+                    'yesterday': row[4] or 0,
+                    'weekly': row[5] or 0,
+                    'monthly': row[6] or 0
+                }
+        
         return stats
 
 
 def get_user_meta(username: str) -> Optional[Dict]:
-    """Get metadata for a specific user.
+    """Get user metadata (level, icon, colors, etc).
     
     Args:
         username: Username to query
         
     Returns:
-        Dict with metadata or None if user not found
+        Dict with metadata or None if not found
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -180,8 +244,8 @@ def get_user_meta(username: str) -> Optional[Dict]:
             FROM user_meta
             WHERE LOWER(username) = LOWER(?)
         ''', (username,))
-        
         row = cursor.fetchone()
+        
         if row:
             return {
                 'level': row[0],
@@ -189,7 +253,7 @@ def get_user_meta(username: str) -> Optional[Dict]:
                 'ign_color': row[2],
                 'guild_tag': row[3],
                 'guild_hex': row[4],
-                'rank': row[5] if len(row) > 5 else None
+                'rank': row[5]
             }
         return None
 
@@ -198,15 +262,13 @@ def get_all_user_meta() -> Dict[str, Dict]:
     """Get metadata for all users.
     
     Returns:
-        Dict mapping username to metadata dict
+        Dict mapping username to metadata
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT username, level, icon, ign_color, guild_tag, guild_hex, rank FROM user_meta')
-        
-        result = {}
-        for row in cursor.fetchall():
-            result[row['username']] = {
+        return {
+            row['username']: {
                 'level': row['level'],
                 'icon': row['icon'],
                 'ign_color': row['ign_color'],
@@ -214,33 +276,67 @@ def get_all_user_meta() -> Dict[str, Dict]:
                 'guild_hex': row['guild_hex'],
                 'rank': row['rank']
             }
-        return result
+            for row in cursor.fetchall()
+        }
 
 
 def update_user_stats(username: str, stats: Dict[str, float], 
-                     snapshot_sections: Optional[Set[str]] = None):
+                     snapshot_sections: Optional[Set[str]] = None,
+                     new_stat_categories: Optional[Set[str]] = None):
     """Update user stats with new API data.
     
     This function:
     1. Updates lifetime values with current API data
     2. Optionally takes snapshots for specified periods
     3. Calculates deltas (current - snapshot) for all periods
+    4. Normalizes username casing to prevent duplicates
+    5. For NEW stat categories (CTW/WW), sets ALL snapshots to lifetime value on first update
     
     Args:
-        username: Username to update
+        username: Username to update (will be normalized to existing casing if found)
         stats: Dict mapping stat_name to current lifetime value
         snapshot_sections: Set of periods to snapshot ("session", "daily", "monthly")
+        new_stat_categories: Set of stat categories that are new ("ctw", "ww") - these will
+                           have snapshots set to lifetime value to make initial deltas = lifetime
     """
     snapshot_sections = snapshot_sections or set()
+    new_stat_categories = new_stat_categories or set()
     
     with get_db_connection() as conn:
         cursor = conn.cursor()
         
+        # Check if user already exists (case-insensitive) and get proper casing
+        cursor.execute('''
+            SELECT DISTINCT username FROM (
+                SELECT username FROM general_stats
+                UNION
+                SELECT username FROM sheep_stats
+                UNION
+                SELECT username FROM ctw_stats
+                UNION
+                SELECT username FROM ww_stats
+            ) WHERE LOWER(username) = LOWER(?) LIMIT 1
+        ''', (username,))
+        existing_user = cursor.fetchone()
+        if existing_user:
+            # Use existing casing to prevent duplicates
+            username = existing_user[0]
+        
         for stat_name, lifetime_value in stats.items():
+            # Determine which table this stat belongs to
+            table = get_stat_table(stat_name)
+            
+            # Determine if this is a "new" stat category
+            is_new_category = False
+            if table == 'ctw_stats' and 'ctw' in new_stat_categories:
+                is_new_category = True
+            elif table == 'ww_stats' and 'ww' in new_stat_categories:
+                is_new_category = True
+            
             # Get existing record or create new one
-            cursor.execute('''
-                SELECT session, daily, yesterday, monthly
-                FROM user_stats
+            cursor.execute(f'''
+                SELECT session, daily, yesterday, weekly, monthly
+                FROM {table}
                 WHERE username = ? AND stat_name = ?
             ''', (username, stat_name))
             
@@ -250,14 +346,26 @@ def update_user_stats(username: str, stats: Dict[str, float],
                 session_snap = existing[0] if existing[0] is not None else lifetime_value
                 daily_snap = existing[1] if existing[1] is not None else lifetime_value
                 yesterday_snap = existing[2] if existing[2] is not None else lifetime_value
-                monthly_snap = existing[3] if existing[3] is not None else lifetime_value
+                weekly_snap = existing[3] if existing[3] is not None else lifetime_value
+                monthly_snap = existing[4] if existing[4] is not None else lifetime_value
             else:
-                # New stat - initialize all snapshots to current lifetime value
-                # This makes initial deltas = 0, which is correct for a new stat
-                session_snap = lifetime_value
-                daily_snap = lifetime_value
-                yesterday_snap = lifetime_value
-                monthly_snap = lifetime_value
+                # New stat - decide how to initialize snapshots
+                if is_new_category:
+                    # For NEW categories (CTW/WW on first API call), set all snapshots to lifetime
+                    # This makes deltas = lifetime (showing all progress since start)
+                    session_snap = lifetime_value
+                    daily_snap = lifetime_value
+                    yesterday_snap = lifetime_value
+                    weekly_snap = lifetime_value
+                    monthly_snap = lifetime_value
+                else:
+                    # For existing categories (sheep wars), initialize to lifetime
+                    # This makes initial deltas = 0, which is correct for a new stat
+                    session_snap = lifetime_value
+                    daily_snap = lifetime_value
+                    yesterday_snap = lifetime_value
+                    weekly_snap = lifetime_value
+                    monthly_snap = lifetime_value
             
             # Update snapshots if explicitly requested
             if "session" in snapshot_sections:
@@ -266,23 +374,25 @@ def update_user_stats(username: str, stats: Dict[str, float],
                 daily_snap = lifetime_value
             if "yesterday" in snapshot_sections:
                 yesterday_snap = lifetime_value
+            if "weekly" in snapshot_sections:
+                weekly_snap = lifetime_value
             if "monthly" in snapshot_sections:
                 monthly_snap = lifetime_value
             
             # Insert or update - store SNAPSHOTS, not deltas
             # Deltas are calculated on read
-            cursor.execute('''
-                INSERT OR REPLACE INTO user_stats 
-                (username, stat_name, lifetime, session, daily, yesterday, monthly)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+            cursor.execute(f'''
+                INSERT OR REPLACE INTO {table}
+                (username, stat_name, lifetime, session, daily, yesterday, weekly, monthly)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (username, stat_name, lifetime_value, 
-                  session_snap, daily_snap, yesterday_snap, monthly_snap))
+                  session_snap, daily_snap, yesterday_snap, weekly_snap, monthly_snap))
         
         conn.commit()
 
 
 def get_user_stats_with_deltas(username: str) -> Dict[str, Dict[str, float]]:
-    """Get user stats with calculated deltas.
+    """Get user stats with calculated deltas across all tables.
     
     This returns the format expected by the bot:
     - lifetime: current value from API
@@ -296,28 +406,35 @@ def get_user_stats_with_deltas(username: str) -> Dict[str, Dict[str, float]]:
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('''
-            SELECT stat_name, lifetime, session, daily, yesterday, monthly
-            FROM user_stats
-            WHERE LOWER(username) = LOWER(?)
-        ''', (username,))
         
         stats = {}
-        for row in cursor.fetchall():
-            stat_name = row[0]
-            lifetime = row[1] or 0
-            session_snap = row[2] or 0
-            daily_snap = row[3] or 0
-            yesterday_snap = row[4] or 0
-            monthly_snap = row[5] or 0
+        tables = ['general_stats', 'sheep_stats', 'ctw_stats', 'ww_stats']
+        
+        for table in tables:
+            cursor.execute(f'''
+                SELECT stat_name, lifetime, session, daily, yesterday, weekly, monthly
+                FROM {table}
+                WHERE username = ?
+            ''', (username,))
             
-            stats[stat_name] = {
-                'lifetime': lifetime,
-                'session': lifetime - session_snap,
-                'daily': lifetime - daily_snap,
-                'yesterday': lifetime - yesterday_snap,
-                'monthly': lifetime - monthly_snap
-            }
+            for row in cursor.fetchall():
+                stat_name = row[0]
+                lifetime = row[1] or 0
+                session_snap = row[2] or 0
+                daily_snap = row[3] or 0
+                yesterday_snap = row[4] or 0
+                weekly_snap = row[5] or 0
+                monthly_snap = row[6] or 0
+                
+                stats[stat_name] = {
+                    'lifetime': lifetime,
+                    'session': lifetime - session_snap,
+                    'daily': lifetime - daily_snap,
+                    'yesterday': lifetime - yesterday_snap,
+                    'weekly': lifetime - weekly_snap,
+                    'monthly': lifetime - monthly_snap
+                }
+        
         return stats
 
 
@@ -402,22 +519,58 @@ def rotate_daily_to_yesterday(usernames: List[str]) -> Dict[str, bool]:
     
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        tables = ['general_stats', 'sheep_stats', 'ctw_stats', 'ww_stats']
         
         for username in usernames:
             try:
-                # Copy daily column to yesterday column for all stats
-                cursor.execute('''
-                    UPDATE user_stats
-                    SET yesterday = daily
-                    WHERE LOWER(username) = LOWER(?)
-                ''', (username,))
+                # Copy daily column to yesterday column for all stats in all tables
+                for table in tables:
+                    cursor.execute(f'''
+                        UPDATE {table}
+                        SET yesterday = daily
+                        WHERE username = ?
+                    ''', (username,))
                 
-                if cursor.rowcount > 0:
-                    results[username] = True
-                else:
-                    results[username] = False
+                results[username] = True
             except Exception as e:
                 print(f"[ERROR] Failed to rotate {username}: {e}")
+                results[username] = False
+        
+        conn.commit()
+    
+    return results
+
+
+def reset_weekly_snapshots(usernames: List[str]) -> Dict[str, bool]:
+    """Reset weekly snapshot to current lifetime values for specified users.
+    
+    This is called every Monday at 9:30 AM EST to reset the weekly tracking period.
+    
+    Args:
+        usernames: List of usernames to reset
+        
+    Returns:
+        Dict mapping username to success status
+    """
+    results = {}
+    
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        tables = ['general_stats', 'sheep_stats', 'ctw_stats', 'ww_stats']
+        
+        for username in usernames:
+            try:
+                # Set weekly snapshot to current lifetime value for all stats in all tables
+                for table in tables:
+                    cursor.execute(f'''
+                        UPDATE {table}
+                        SET weekly = lifetime
+                        WHERE username = ?
+                    ''', (username,))
+                
+                results[username] = True
+            except Exception as e:
+                print(f"[ERROR] Failed to reset weekly for {username}: {e}")
                 results[username] = False
         
         conn.commit()
@@ -436,11 +589,15 @@ def user_exists(username: str) -> bool:
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('''
-            SELECT COUNT(*) FROM user_stats WHERE LOWER(username) = LOWER(?)
-        ''', (username,))
-        count = cursor.fetchone()[0]
-        return count > 0
+        # Check all stat tables
+        for table in ['general_stats', 'sheep_stats', 'ctw_stats', 'ww_stats']:
+            cursor.execute(f'''
+                SELECT COUNT(*) FROM {table} WHERE LOWER(username) = LOWER(?)
+            ''', (username,))
+            count = cursor.fetchone()[0]
+            if count > 0:
+                return True
+        return False
 
 
 def delete_user(username: str):
@@ -451,7 +608,9 @@ def delete_user(username: str):
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('DELETE FROM user_stats WHERE LOWER(username) = LOWER(?)', (username,))
+        tables = ['general_stats', 'sheep_stats', 'ctw_stats', 'ww_stats']
+        for table in tables:
+            cursor.execute(f'DELETE FROM {table} WHERE LOWER(username) = LOWER(?)', (username,))
         cursor.execute('DELETE FROM user_meta WHERE LOWER(username) = LOWER(?)', (username,))
         conn.commit()
 
@@ -465,15 +624,29 @@ def get_database_stats() -> Dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         
-        cursor.execute('SELECT COUNT(DISTINCT username) FROM user_stats')
+        # Get unique usernames across all stat tables
+        cursor.execute('''
+            SELECT COUNT(DISTINCT username) FROM (
+                SELECT username FROM general_stats
+                UNION
+                SELECT username FROM sheep_stats
+                UNION
+                SELECT username FROM ctw_stats
+                UNION
+                SELECT username FROM ww_stats
+            )
+        ''')
         user_count = cursor.fetchone()[0]
         
-        cursor.execute('SELECT COUNT(*) FROM user_stats')
-        stat_count = cursor.fetchone()[0]
+        # Get total stat count
+        total_stats = 0
+        for table in ['general_stats', 'sheep_stats', 'ctw_stats', 'ww_stats']:
+            cursor.execute(f'SELECT COUNT(*) FROM {table}')
+            total_stats += cursor.fetchone()[0]
         
         return {
             'users': user_count,
-            'total_stats': stat_count,
+            'total_stats': total_stats,
             'db_file': str(DB_FILE),
             'exists': DB_FILE.exists()
         }
@@ -688,19 +861,26 @@ def get_all_tracked_streaks() -> Dict[str, Dict]:
 # Tracked Users Functions
 # ============================================================================
 
-def add_tracked_user(username: str):
+def add_tracked_user(username: str) -> bool:
     """Add a username to tracked users.
     
     Args:
         username: Minecraft username to track
+        
+    Returns:
+        bool: True if user was added, False if already tracked
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR IGNORE INTO tracked_users (username)
-            VALUES (?)
-        ''', (username,))
+        # Check if user already exists (case-insensitive)
+        cursor.execute('SELECT username FROM tracked_users WHERE LOWER(username) = LOWER(?)', (username,))
+        if cursor.fetchone():
+            return False
+        
+        # Add the user with the provided casing
+        cursor.execute('INSERT INTO tracked_users (username) VALUES (?)', (username,))
         conn.commit()
+        return cursor.rowcount > 0
 
 
 def remove_tracked_user(username: str):
